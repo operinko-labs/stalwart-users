@@ -76,11 +76,14 @@ func main() {
 	apiRouter.HandleFunc("GET /accounts", api.AccountsHandler(pool))
 	apiRouter.HandleFunc("GET /accounts/{name}", api.AccountHandler(pool))
 	apiRouter.HandleFunc("GET /accounts/{name}/emails", api.ListEmailsHandler(pool))
+	apiRouter.HandleFunc("GET /accounts/{name}/groups", api.ListGroupsHandler(pool))
 	apiRouter.HandleFunc("POST /accounts", api.CreateAccountHandler(pool))
 	apiRouter.HandleFunc("POST /accounts/{name}/emails", api.CreateEmailHandler(pool))
+	apiRouter.HandleFunc("POST /accounts/{name}/groups", api.CreateGroupHandler(pool))
 	apiRouter.HandleFunc("PATCH /accounts/{name}", api.AccountHandler(pool))
 	apiRouter.HandleFunc("DELETE /accounts/{name}", api.AccountHandler(pool))
 	apiRouter.HandleFunc("DELETE /accounts/{name}/emails/{address}", api.DeleteEmailHandler(pool))
+	apiRouter.HandleFunc("DELETE /accounts/{name}/groups/{group}", api.DeleteGroupHandler(pool))
 
 	// Mount API subrouter under path prefix with StripPrefix
 	rootMux.Handle(pathPrefix+"/", http.StripPrefix(pathPrefix, apiRouter))

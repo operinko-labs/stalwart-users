@@ -1,0 +1,4 @@
+Task 2 verification complete:
+- go test ./internal/db/... -> ok
+- go build ./cmd/server/ -> ok
+- go test ./... -> ok

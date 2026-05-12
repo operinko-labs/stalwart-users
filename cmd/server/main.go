@@ -6,6 +6,9 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+
+	"github.com/operinko-labs/stalwart-users/internal/api"
+	"github.com/operinko-labs/stalwart-users/internal/db"
 )
 
 func main() {
@@ -51,12 +54,21 @@ func main() {
 	// Create root mux
 	rootMux := http.NewServeMux()
 
+	var pool *db.Pool
+	if databaseURL != "" {
+		pool, err = db.NewPool(databaseURL)
+		if err != nil {
+			log.Fatalf("Failed to connect to database: %v", err)
+		}
+		defer func() {
+			if err := pool.Close(); err != nil {
+				log.Printf("Failed to close database pool: %v", err)
+			}
+		}()
+	}
+
 	// Register health endpoint on root mux (not prefixed)
-	rootMux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-		fmt.Fprintf(w, `{"status":"ok"}`)
-	})
+	rootMux.HandleFunc("GET /healthz", api.HealthHandler(pool))
 
 	// Create API subrouter
 	apiRouter := http.NewServeMux()

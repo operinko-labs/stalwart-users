@@ -1,2 +1,3 @@
 - Task 2: database pool uses `database/sql` with `lib/pq`, sets max open connections to 10, max idle to 5, connection lifetime to 5 minutes, and performs a fail-fast 5 second ping during pool creation.
 - Task 2: health handling stays on the root mux and returns HTTP 200 with `no database configured` when no pool is present, or HTTP 503 with the ping error message when database health checks fail.
+- Task 3: SSHA512 implementation uses `crypto/sha512` for hashing, `crypto/rand` for 16-byte salt generation, and `crypto/subtle.ConstantTimeCompare` for secure password verification. Format: `{SSHA512}` + base64(SHA512(password+salt)+salt). Empty passwords rejected with error. Random salt ensures different hashes for same password.

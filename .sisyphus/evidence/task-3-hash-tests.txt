@@ -1,0 +1,12 @@
+=== RUN   TestHashPassword
+--- PASS: TestHashPassword (0.00s)
+=== RUN   TestVerifyPassword
+--- PASS: TestVerifyPassword (0.00s)
+=== RUN   TestVerifyPasswordWrong
+--- PASS: TestVerifyPasswordWrong (0.00s)
+=== RUN   TestHashPasswordEmpty
+--- PASS: TestHashPasswordEmpty (0.00s)
+=== RUN   TestHashPasswordRandomSalt
+--- PASS: TestHashPasswordRandomSalt (0.00s)
+PASS
+ok  	github.com/operinko-labs/stalwart-users/internal/auth	(cached)

@@ -6,8 +6,10 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"strings"
 
 	"github.com/operinko-labs/stalwart-users/internal/api"
+	"github.com/operinko-labs/stalwart-users/internal/auth"
 	"github.com/operinko-labs/stalwart-users/internal/db"
 )
 
@@ -34,6 +36,23 @@ func main() {
 	if pathPrefix == "" {
 		pathPrefix = "/accounts"
 	}
+
+	if stalwartURL == "" {
+		stalwartURL = "http://localhost:8080"
+	}
+
+	// Parse ADMIN_USERS into a slice
+	var adminUsersList []string
+	if adminUsers != "" {
+		adminUsersList = strings.Split(adminUsers, ",")
+		// Trim whitespace from each username
+		for i := range adminUsersList {
+			adminUsersList[i] = strings.TrimSpace(adminUsersList[i])
+		}
+	}
+
+	// Parse AUTH_BYPASS
+	authBypassEnabled := authBypass == "true"
 
 	// Log configuration (non-sensitive)
 	log.Printf("Starting Stalwart User Management API")
@@ -85,8 +104,9 @@ func main() {
 	apiRouter.HandleFunc("DELETE /accounts/{name}/emails/{address}", api.DeleteEmailHandler(pool))
 	apiRouter.HandleFunc("DELETE /accounts/{name}/groups/{group}", api.DeleteGroupHandler(pool))
 
-	// Mount API subrouter under path prefix with StripPrefix
-	rootMux.Handle(pathPrefix+"/", http.StripPrefix(pathPrefix, apiRouter))
+	// Wrap API subrouter with auth middleware and mount under path prefix
+	authMiddleware := auth.JMAPAuthMiddleware(stalwartURL, adminUsersList, authBypassEnabled)
+	rootMux.Handle(pathPrefix+"/", authMiddleware(http.StripPrefix(pathPrefix, apiRouter)))
 
 	// Serve UI if configured (lowest priority)
 	if serveUI != "" {

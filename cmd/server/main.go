@@ -73,12 +73,11 @@ func main() {
 	// Create API subrouter
 	apiRouter := http.NewServeMux()
 
-	// Register API routes (placeholder)
-	apiRouter.HandleFunc("GET /", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-		fmt.Fprintf(w, `{"message":"Stalwart User Management API"}`)
-	})
+	apiRouter.HandleFunc("GET /accounts", api.AccountsHandler(pool))
+	apiRouter.HandleFunc("GET /accounts/{name}", api.AccountHandler(pool))
+	apiRouter.HandleFunc("POST /accounts", api.CreateAccountHandler(pool))
+	apiRouter.HandleFunc("PATCH /accounts/{name}", api.AccountHandler(pool))
+	apiRouter.HandleFunc("DELETE /accounts/{name}", api.AccountHandler(pool))
 
 	// Mount API subrouter under path prefix with StripPrefix
 	rootMux.Handle(pathPrefix+"/", http.StripPrefix(pathPrefix, apiRouter))

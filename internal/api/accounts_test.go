@@ -65,6 +65,9 @@ func (m *mockAccountsStore) CreateAccount(name, secret, description, accountType
 	m.createdDescription = description
 	m.createdType = accountType
 	m.createdQuota = quota
+	if m.callOrder != nil {
+		*m.callOrder = append(*m.callOrder, "db.create")
+	}
 	return m.createAccountErr
 }
 
@@ -73,6 +76,9 @@ func (m *mockAccountsStore) InsertEmail(name, address, emailType string) error {
 	m.insertedName = name
 	m.insertedAddress = address
 	m.insertedType = emailType
+	if m.callOrder != nil {
+		*m.callOrder = append(*m.callOrder, "db.insert_email")
+	}
 	return m.insertEmailErr
 }
 
@@ -350,8 +356,9 @@ func TestAccountHandlerDeleteReturnsNotFound(t *testing.T) {
 func TestCreateAccountHandlerCallsJMAP(t *testing.T) {
 	t.Parallel()
 
-	store := &mockAccountsStore{}
-	stalwart := &mockStalwartClient{}
+	order := []string{}
+	store := &mockAccountsStore{callOrder: &order}
+	stalwart := &mockStalwartClient{callOrder: &order}
 	body := strings.NewReader(`{"name":"alice@example.com","password":"secret"}`)
 	req := httptest.NewRequest(http.MethodPost, "/accounts", body)
 	rr := httptest.NewRecorder()
@@ -367,9 +374,12 @@ func TestCreateAccountHandlerCallsJMAP(t *testing.T) {
 	if stalwart.createdName != "alice@example.com" || stalwart.createdPass != "secret" {
 		t.Fatalf("created account = %#v, want propagated request fields", stalwart)
 	}
+	if len(order) < 2 || order[0] != "stalwart.create" || order[1] != "db.create" {
+		t.Fatalf("call order = %#v, want stalwart create before db create", order)
+	}
 }
 
-func TestCreateAccountHandlerSucceedsWhenJMAPFails(t *testing.T) {
+func TestCreateAccountHandlerReturnsErrorWhenJMAPFails(t *testing.T) {
 	t.Parallel()
 
 	store := &mockAccountsStore{}
@@ -380,14 +390,46 @@ func TestCreateAccountHandlerSucceedsWhenJMAPFails(t *testing.T) {
 
 	newCreateAccountHandler(store, stalwart).ServeHTTP(rr, req)
 
-	if rr.Code != http.StatusCreated {
-		t.Fatalf("status code = %d, want %d", rr.Code, http.StatusCreated)
+	if rr.Code != http.StatusInternalServerError {
+		t.Fatalf("status code = %d, want %d", rr.Code, http.StatusInternalServerError)
+	}
+	if store.createCalls != 0 {
+		t.Fatalf("CreateAccount calls = %d, want 0", store.createCalls)
+	}
+	if stalwart.createCalls != 1 {
+		t.Fatalf("CreateAccount calls = %d, want 1", stalwart.createCalls)
+	}
+}
+
+func TestCreateAccountHandlerRollsBackOnDBFailure(t *testing.T) {
+	t.Parallel()
+
+	order := []string{}
+	store := &mockAccountsStore{createAccountErr: errors.New("db unavailable"), callOrder: &order}
+	stalwart := &mockStalwartClient{callOrder: &order}
+	body := strings.NewReader(`{"name":"alice@example.com","password":"secret"}`)
+	req := httptest.NewRequest(http.MethodPost, "/accounts", body)
+	rr := httptest.NewRecorder()
+
+	newCreateAccountHandler(store, stalwart).ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusInternalServerError {
+		t.Fatalf("status code = %d, want %d", rr.Code, http.StatusInternalServerError)
+	}
+	if stalwart.createCalls != 1 {
+		t.Fatalf("CreateAccount calls = %d, want 1", stalwart.createCalls)
 	}
 	if store.createCalls != 1 {
 		t.Fatalf("CreateAccount calls = %d, want 1", store.createCalls)
 	}
-	if stalwart.createCalls != 1 {
-		t.Fatalf("CreateAccount calls = %d, want 1", stalwart.createCalls)
+	if stalwart.deleteCalls != 1 || stalwart.deletedName != "alice@example.com" {
+		t.Fatalf("DeleteAccount calls=%d name=%q, want 1/alice@example.com", stalwart.deleteCalls, stalwart.deletedName)
+	}
+	if store.insertCalls != 0 {
+		t.Fatalf("InsertEmail calls = %d, want 0", store.insertCalls)
+	}
+	if len(order) != 3 || order[0] != "stalwart.create" || order[1] != "db.create" || order[2] != "stalwart.delete" {
+		t.Fatalf("call order = %#v, want create then rollback delete", order)
 	}
 }
 
@@ -417,7 +459,7 @@ func TestDeleteAccountHandlerCallsJMAP(t *testing.T) {
 	}
 }
 
-func TestAccountHandlerDeleteContinuesWhenJMAPFails(t *testing.T) {
+func TestDeleteAccountHandlerContinuesWhenJMAPFails(t *testing.T) {
 	t.Parallel()
 
 	store := &mockAccountsStore{}
@@ -433,5 +475,8 @@ func TestAccountHandlerDeleteContinuesWhenJMAPFails(t *testing.T) {
 	}
 	if store.deleteCalls != 1 {
 		t.Fatalf("DeleteAccount calls = %d, want 1", store.deleteCalls)
+	}
+	if stalwart.deleteCalls != 1 {
+		t.Fatalf("Stalwart DeleteAccount calls = %d, want 1", stalwart.deleteCalls)
 	}
 }

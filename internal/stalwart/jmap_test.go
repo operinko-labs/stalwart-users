@@ -45,10 +45,17 @@ func TestCreateAccountSuccess(t *testing.T) {
 			if new1["name"] != "alice" || new1["domainId"] != "domain-1" {
 				t.Fatalf("create payload = %#v, want alice/domain-1", new1)
 			}
-			credentials := new1["credentials"].([]any)
-			credential := credentials[0].(map[string]any)
-			if credential["secret"] != "plaintext-password" {
-				t.Fatalf("credential = %#v, want plaintext password", credential)
+			credentials := new1["credentials"].(map[string]any)
+			if len(credentials) != 0 {
+				t.Fatalf("credentials = %#v, want empty object", credentials)
+			}
+			memberGroupIDs := new1["memberGroupIds"].(map[string]any)
+			if len(memberGroupIDs) != 0 {
+				t.Fatalf("memberGroupIds = %#v, want empty object", memberGroupIDs)
+			}
+			aliases := new1["aliases"].(map[string]any)
+			if len(aliases) != 0 {
+				t.Fatalf("aliases = %#v, want empty object", aliases)
 			}
 			_, _ = w.Write([]byte(`{"methodResponses":[["x:Account/set",{"created":{"new1":{"id":"account-1"}}},"c1"]]}`))
 		default:

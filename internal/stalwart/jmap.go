@@ -64,6 +64,8 @@ func NewClient(baseURL, adminToken string) *Client {
 }
 
 func (c *Client) CreateAccount(ctx context.Context, name, password string) error {
+	_ = password
+
 	localPart, domain, err := splitAddress(name)
 	if err != nil {
 		return err
@@ -81,12 +83,12 @@ func (c *Client) CreateAccount(ctx context.Context, name, password string) error
 				"@type":            "User",
 				"name":             localPart,
 				"domainId":         domainID,
-				"credentials":      []map[string]any{{"@type": "Password", "secret": password}},
-				"memberGroupIds":   []string{},
+				"credentials":      map[string]any{},
+				"memberGroupIds":   map[string]any{},
 				"roles":            map[string]any{"@type": "User"},
 				"permissions":      map[string]any{"@type": "Inherit"},
 				"quotas":           map[string]any{},
-				"aliases":          []string{},
+				"aliases":          map[string]any{},
 				"encryptionAtRest": map[string]any{"@type": "Disabled"},
 			},
 		},

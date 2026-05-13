@@ -107,21 +107,27 @@ func newCreateAccountHandler(store accountsStore, jmap stalwartClient) http.Hand
 			accountType = "individual"
 		}
 
+		if jmap != nil {
+			if err := jmap.CreateAccount(r.Context(), req.Name, req.Password); err != nil {
+				log.Printf("Failed to create Stalwart account for %s: %v", req.Name, err)
+				writeError(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+		}
+
 		if err := store.CreateAccount(req.Name, secret, req.Description, accountType, req.Quota); err != nil {
+			if jmap != nil {
+				if rollbackErr := jmap.DeleteAccount(r.Context(), req.Name); rollbackErr != nil {
+					log.Printf("Failed to roll back Stalwart account for %s after DB create failure: %v", req.Name, rollbackErr)
+				}
+			}
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
 
 		if strings.Contains(req.Name, "@") {
 			if err := store.InsertEmail(req.Name, req.Name, "primary"); err != nil {
-				writeError(w, http.StatusInternalServerError, err.Error())
-				return
-			}
-		}
-
-		if jmap != nil {
-			if err := jmap.CreateAccount(r.Context(), req.Name, req.Password); err != nil {
-				log.Printf("Failed to create Stalwart account for %s: %v", req.Name, err)
+				log.Printf("Failed to insert primary email for %s: %v", req.Name, err)
 			}
 		}
 

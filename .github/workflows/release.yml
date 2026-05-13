@@ -23,7 +23,7 @@ jobs:
           cd ui && zip -r ../stalwart-users-ui.zip .
 
       - name: Create GitHub release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: stalwart-users-ui.zip
           generate_release_notes: true

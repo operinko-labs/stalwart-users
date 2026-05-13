@@ -8,9 +8,17 @@ import (
 	"errors"
 )
 
+const ssha512Prefix = "{SSHA512}"
+
 // HashPassword generates an SSHA512 hash of the password with a random 16-byte salt.
 // Returns a string in the format: {SSHA512}<base64(sha512(password+salt)+salt)>
 func HashPassword(password string) (string, error) {
+	return HashSSHA512(password)
+}
+
+// HashSSHA512 generates an SSHA512 hash of the password with a random 16-byte salt.
+// Returns a string in the format: {SSHA512}<base64(sha512(password+salt)+salt)>
+func HashSSHA512(password string) (string, error) {
 	if password == "" {
 		return "", errors.New("password cannot be empty")
 	}
@@ -32,20 +40,19 @@ func HashPassword(password string) (string, error) {
 
 	// Return {SSHA512} + base64(hash+salt)
 	encoded := base64.StdEncoding.EncodeToString(hashAndSalt)
-	return "{SSHA512}" + encoded, nil
+	return ssha512Prefix + encoded, nil
 }
 
 // VerifyPassword verifies a password against an SSHA512 hash.
 // Returns true if the password matches, false otherwise.
 func VerifyPassword(password, encoded string) bool {
 	// Strip {SSHA512} prefix
-	const prefix = "{SSHA512}"
-	if !hasPrefix(encoded, prefix) {
+	if !hasPrefix(encoded, ssha512Prefix) {
 		return false
 	}
 
 	// Base64 decode the remainder
-	decoded, err := base64.StdEncoding.DecodeString(encoded[len(prefix):])
+	decoded, err := base64.StdEncoding.DecodeString(encoded[len(ssha512Prefix):])
 	if err != nil {
 		return false
 	}

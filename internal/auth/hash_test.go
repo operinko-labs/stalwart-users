@@ -90,3 +90,16 @@ func TestHashPasswordRandomSalt(t *testing.T) {
 		t.Errorf("Second hash should verify correctly")
 	}
 }
+
+func TestHashSSHA512RoundTrip(t *testing.T) {
+	t.Parallel()
+
+	hash, err := HashSSHA512("roundtrip-password")
+	if err != nil {
+		t.Fatalf("HashSSHA512() error = %v", err)
+	}
+
+	if !VerifyPassword("roundtrip-password", hash) {
+		t.Fatal("VerifyPassword() = false, want true")
+	}
+}

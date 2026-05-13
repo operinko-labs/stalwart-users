@@ -17,15 +17,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Create SPA zip
-        run: |
-          sudo apt-get update && sudo apt-get -y install zip
-          cd ui && zip -r ../stalwart-users-ui.zip .
-
       - name: Create GitHub release
         uses: softprops/action-gh-release@v2
         with:
-          files: stalwart-users-ui.zip
           generate_release_notes: true
 
       - name: Set image tag
@@ -63,3 +57,16 @@ jobs:
 
       - name: Push image
         run: podman push ${{ steps.build.outputs.image }}:${{ steps.tag.outputs.tag }}
+
+      - name: Build frontend image
+        id: build-frontend
+        uses: redhat-actions/buildah-build@7a95fa7ee0f02d552a32753e7414641a04307056 # v2.13
+        with:
+          image: ${{ env.IMAGE_PREFIX }}/stalwart-users-frontend
+          tags: ${{ steps.tag.outputs.tag }}
+          containerfiles: Dockerfile.frontend
+          context: .
+          layers: true
+
+      - name: Push frontend image
+        run: podman push ${{ steps.build-frontend.outputs.image }}:${{ steps.tag.outputs.tag }}

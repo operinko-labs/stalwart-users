@@ -67,6 +67,22 @@ func (p *Pool) CreateAccount(name, secret, description, accountType string, quot
 	return err
 }
 
+func (p *Pool) GetAccountSecret(name string) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	var secret string
+	err := p.DB().QueryRowContext(ctx, `SELECT secret FROM directory.accounts WHERE name = $1`, name).Scan(&secret)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", ErrAccountNotFound
+	}
+	if err != nil {
+		return "", err
+	}
+
+	return secret, nil
+}
+
 func (p *Pool) InsertEmail(name, address, emailType string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -110,6 +126,26 @@ func (p *Pool) UpdateAccount(name string, description *string, quota *int, activ
 	defer cancel()
 
 	result, err := p.DB().ExecContext(ctx, query, args...)
+	if err != nil {
+		return err
+	}
+
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rowsAffected == 0 {
+		return ErrAccountNotFound
+	}
+
+	return nil
+}
+
+func (p *Pool) UpdateAccountPassword(name, secret string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	result, err := p.DB().ExecContext(ctx, `UPDATE directory.accounts SET secret = $1 WHERE name = $2`, secret, name)
 	if err != nil {
 		return err
 	}

@@ -21,3 +21,8 @@ type UpdateAccountRequest struct {
 	Quota       *int    `json:"quota,omitempty"`
 	Active      *bool   `json:"active,omitempty"`
 }
+
+type ChangePasswordRequest struct {
+	CurrentPassword string `json:"current_password,omitempty"`
+	NewPassword     string `json:"new_password"`
+}

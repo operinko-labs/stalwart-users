@@ -71,7 +71,12 @@ export const api = {
       }),
   },
   emails: {
-    list: (name: string) => request<string[]>(`/accounts/${encodeURIComponent(name)}/emails`),
+    list: async (name: string) => {
+      const data = await request<{ name: string; address: string; type: string }[]>(
+        `/accounts/${encodeURIComponent(name)}/emails`
+      )
+      return data.map((e) => e.address)
+    },
     add: (name: string, address: string) =>
       request<unknown>(`/accounts/${encodeURIComponent(name)}/emails`, {
         method: 'POST',

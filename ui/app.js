@@ -1,5 +1,5 @@
 // Configuration
-window.API_BASE = window.location.pathname.startsWith('/manage/users') ? '../api' : '';
+window.API_BASE = window.location.pathname.startsWith('/manage') ? '/manage/api' : '';
 
 // DOM Elements
 const elements = {

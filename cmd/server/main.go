@@ -2,7 +2,6 @@ package main
 
 import (
 	"database/sql"
-	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -18,8 +17,6 @@ const apiBasePath = "/api"
 
 type serverConfig struct {
 	DatabaseURL         string
-	StalwartURL         string
-	StalwartAdminToken  string
 	JWTSecret           string
 	PathPrefix          string
 	CORSOrigin          string
@@ -37,9 +34,6 @@ func main() {
 	log.Printf("  Port: %d", cfg.Port)
 	log.Printf("  Path Prefix: %s", cfg.PathPrefix)
 	log.Printf("  CORS Origin: %s", cfg.CORSOrigin)
-	if cfg.StalwartURL != "" {
-		log.Printf("  Stalwart URL: %s", cfg.StalwartURL)
-	}
 	if cfg.DatabaseURL != "" {
 		log.Printf("  Database: configured")
 	}
@@ -83,25 +77,17 @@ func loadConfigFromEnv() (serverConfig, error) {
 
 	cfg := serverConfig{
 		DatabaseURL:        os.Getenv("DATABASE_URL"),
-		StalwartURL:        os.Getenv("STALWART_URL"),
-		StalwartAdminToken: os.Getenv("STALWART_ADMIN_TOKEN"),
 		JWTSecret:          os.Getenv("JWT_SECRET"),
 		PathPrefix:         os.Getenv("PATH_PREFIX"),
 		CORSOrigin:         os.Getenv("CORS_ORIGIN"),
 		Port:               port,
 	}
 
-	if cfg.StalwartURL == "" {
-		cfg.StalwartURL = "http://localhost:8080"
-	}
 	if cfg.CORSOrigin == "" {
 		cfg.CORSOrigin = "*"
 	}
 	if cfg.JWTSecret == "" {
 		return serverConfig{}, auth.ErrMissingJWTSecret
-	}
-	if cfg.StalwartAdminToken == "" {
-		return serverConfig{}, errors.New("STALWART_ADMIN_TOKEN is required")
 	}
 
 	return cfg, nil
@@ -114,13 +100,12 @@ func newServerHandler(cfg serverConfig, pool *db.Pool) (http.Handler, error) {
 	}
 
 	authenticator := auth.NewSQLDirectoryAuthenticator(dbFromPool(pool))
-	adminChecker := auth.NewStalwartAdminClient(cfg.StalwartURL, cfg.StalwartAdminToken)
 
 	rootMux := http.NewServeMux()
 	rootMux.HandleFunc("GET /healthz", api.HealthHandler(pool))
 
 	apiRouter := http.NewServeMux()
-	apiRouter.HandleFunc("POST /auth/login", auth.LoginHandler(authenticator, tokens, adminChecker))
+	apiRouter.HandleFunc("POST /auth/login", auth.LoginHandler(authenticator, tokens))
 	apiRouter.HandleFunc("GET /auth/me", auth.MeHandler(tokens))
 	apiRouter.HandleFunc("POST /auth/logout", auth.LogoutHandler(tokens))
 	apiRouter.Handle("PUT /accounts/{name}/password", tokens.Middleware(api.ChangePasswordHandler(pool)))

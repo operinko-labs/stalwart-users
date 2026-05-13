@@ -30,16 +30,6 @@ func (s *stubAuthenticator) Authenticate(_ context.Context, username, password s
 	return s.user, s.err
 }
 
-type stubAdminChecker struct {
-	isAdmin bool
-	seen    string
-}
-
-func (s *stubAdminChecker) IsAdmin(_ context.Context, username string) bool {
-	s.seen = username
-	return s.isAdmin
-}
-
 func TestSQLDirectoryAuthenticatorAuthenticatesActiveUser(t *testing.T) {
 	t.Parallel()
 
@@ -54,8 +44,8 @@ func TestSQLDirectoryAuthenticatorAuthenticatesActiveUser(t *testing.T) {
 		t.Fatalf("HashPassword() error = %v", err)
 	}
 
-	rows := sqlmock.NewRows([]string{"name", "secret", "active"}).AddRow("alice@example.com", hash, true)
-	mock.ExpectQuery(`SELECT name, secret, active FROM directory.accounts WHERE name = \$1`).WithArgs("alice@example.com").WillReturnRows(rows)
+	rows := sqlmock.NewRows([]string{"name", "secret", "active", "is_admin"}).AddRow("alice@example.com", hash, true, false)
+	mock.ExpectQuery(`SELECT name, secret, active, is_admin FROM directory.accounts WHERE name = \$1`).WithArgs("alice@example.com").WillReturnRows(rows)
 
 	authenticator := NewSQLDirectoryAuthenticator(database)
 	user, err := authenticator.Authenticate(context.Background(), "alice@example.com", "secret")
@@ -78,8 +68,8 @@ func TestSQLDirectoryAuthenticatorRejectsInactiveOrInvalidUser(t *testing.T) {
 		rows     *sqlmock.Rows
 		password string
 	}{
-		{name: "inactive", rows: sqlmock.NewRows([]string{"name", "secret", "active"}).AddRow("alice@example.com", mustHash(t, "secret"), false), password: "secret"},
-		{name: "wrong password", rows: sqlmock.NewRows([]string{"name", "secret", "active"}).AddRow("alice@example.com", mustHash(t, "secret"), true), password: "wrong"},
+		{name: "inactive", rows: sqlmock.NewRows([]string{"name", "secret", "active", "is_admin"}).AddRow("alice@example.com", mustHash(t, "secret"), false, false), password: "secret"},
+		{name: "wrong password", rows: sqlmock.NewRows([]string{"name", "secret", "active", "is_admin"}).AddRow("alice@example.com", mustHash(t, "secret"), true, false), password: "wrong"},
 	}
 
 	for _, tt := range tests {
@@ -92,7 +82,7 @@ func TestSQLDirectoryAuthenticatorRejectsInactiveOrInvalidUser(t *testing.T) {
 			}
 			defer func() { _ = database.Close() }()
 
-			mock.ExpectQuery(`SELECT name, secret, active FROM directory.accounts WHERE name = \$1`).WithArgs("alice@example.com").WillReturnRows(tt.rows)
+			mock.ExpectQuery(`SELECT name, secret, active, is_admin FROM directory.accounts WHERE name = \$1`).WithArgs("alice@example.com").WillReturnRows(tt.rows)
 
 			authenticator := NewSQLDirectoryAuthenticator(database)
 			user, err := authenticator.Authenticate(context.Background(), "alice@example.com", tt.password)
@@ -118,7 +108,7 @@ func TestSQLDirectoryAuthenticatorReturnsNilForMissingUser(t *testing.T) {
 	}
 	defer func() { _ = database.Close() }()
 
-	mock.ExpectQuery(`SELECT name, secret, active FROM directory.accounts WHERE name = \$1`).WithArgs("missing@example.com").WillReturnError(sql.ErrNoRows)
+	mock.ExpectQuery(`SELECT name, secret, active, is_admin FROM directory.accounts WHERE name = \$1`).WithArgs("missing@example.com").WillReturnError(sql.ErrNoRows)
 
 	authenticator := NewSQLDirectoryAuthenticator(database)
 	user, err := authenticator.Authenticate(context.Background(), "missing@example.com", "secret")
@@ -149,7 +139,7 @@ func TestSQLDirectoryAuthenticatorUsesDummyVerificationForMissingOrInactiveUser(
 		t.Fatalf("sqlmock.New() error = %v", err)
 	}
 	defer func() { _ = missingDB.Close() }()
-	missingMock.ExpectQuery(`SELECT name, secret, active FROM directory.accounts WHERE name = \$1`).WithArgs("missing@example.com").WillReturnError(sql.ErrNoRows)
+	missingMock.ExpectQuery(`SELECT name, secret, active, is_admin FROM directory.accounts WHERE name = \$1`).WithArgs("missing@example.com").WillReturnError(sql.ErrNoRows)
 
 	missingAuthenticator := NewSQLDirectoryAuthenticator(missingDB)
 	missingUser, err := missingAuthenticator.Authenticate(context.Background(), "missing@example.com", "secret")
@@ -165,8 +155,8 @@ func TestSQLDirectoryAuthenticatorUsesDummyVerificationForMissingOrInactiveUser(
 		t.Fatalf("sqlmock.New() error = %v", err)
 	}
 	defer func() { _ = inactiveDB.Close() }()
-	inactiveRows := sqlmock.NewRows([]string{"name", "secret", "active"}).AddRow("alice@example.com", mustHash(t, "stored-secret"), false)
-	inactiveMock.ExpectQuery(`SELECT name, secret, active FROM directory.accounts WHERE name = \$1`).WithArgs("alice@example.com").WillReturnRows(inactiveRows)
+	inactiveRows := sqlmock.NewRows([]string{"name", "secret", "active", "is_admin"}).AddRow("alice@example.com", mustHash(t, "stored-secret"), false, false)
+	inactiveMock.ExpectQuery(`SELECT name, secret, active, is_admin FROM directory.accounts WHERE name = \$1`).WithArgs("alice@example.com").WillReturnRows(inactiveRows)
 
 	inactiveAuthenticator := NewSQLDirectoryAuthenticator(inactiveDB)
 	inactiveUser, err := inactiveAuthenticator.Authenticate(context.Background(), "alice@example.com", "secret")
@@ -200,9 +190,8 @@ func TestLoginHandlerCreatesSessionCookieAndReturnsSession(t *testing.T) {
 		t.Fatalf("NewTokenManager() error = %v", err)
 	}
 
-	authenticator := &stubAuthenticator{user: &AuthenticatedUser{Username: "alice@example.com"}}
-	adminChecker := &stubAdminChecker{isAdmin: true}
-	handler := LoginHandler(authenticator, tokens, adminChecker)
+	authenticator := &stubAuthenticator{user: &AuthenticatedUser{Username: "alice@example.com", IsAdmin: true}}
+	handler := LoginHandler(authenticator, tokens)
 
 	req := httptest.NewRequest(http.MethodPost, "/api/auth/login", strings.NewReader(`{"email":"alice@example.com","password":"secret"}`))
 	rr := httptest.NewRecorder()
@@ -214,9 +203,6 @@ func TestLoginHandlerCreatesSessionCookieAndReturnsSession(t *testing.T) {
 	}
 	if authenticator.seen.username != "alice@example.com" || authenticator.seen.password != "secret" {
 		t.Fatalf("authenticator saw (%q, %q), want alice@example.com/secret", authenticator.seen.username, authenticator.seen.password)
-	}
-	if adminChecker.seen != "alice@example.com" {
-		t.Fatalf("adminChecker saw %q, want alice@example.com", adminChecker.seen)
 	}
 
 	var body Session
@@ -242,7 +228,7 @@ func TestLoginHandlerRejectsInvalidCredentials(t *testing.T) {
 		t.Fatalf("NewTokenManager() error = %v", err)
 	}
 
-	handler := LoginHandler(&stubAuthenticator{}, tokens, &stubAdminChecker{})
+	handler := LoginHandler(&stubAuthenticator{}, tokens)
 	req := httptest.NewRequest(http.MethodPost, "/api/auth/login", strings.NewReader(`{"email":"alice@example.com","password":"wrong"}`))
 	rr := httptest.NewRecorder()
 
@@ -261,7 +247,7 @@ func TestLoginHandlerHandlesAuthenticatorFailure(t *testing.T) {
 		t.Fatalf("NewTokenManager() error = %v", err)
 	}
 
-	handler := LoginHandler(&stubAuthenticator{err: errors.New("boom")}, tokens, &stubAdminChecker{})
+	handler := LoginHandler(&stubAuthenticator{err: errors.New("boom")}, tokens)
 	req := httptest.NewRequest(http.MethodPost, "/api/auth/login", strings.NewReader(`{"email":"alice@example.com","password":"secret"}`))
 	rr := httptest.NewRecorder()
 
@@ -280,7 +266,7 @@ func TestLoginHandlerValidatesRequestBody(t *testing.T) {
 		t.Fatalf("NewTokenManager() error = %v", err)
 	}
 
-	handler := LoginHandler(&stubAuthenticator{}, tokens, &stubAdminChecker{})
+	handler := LoginHandler(&stubAuthenticator{}, tokens)
 	req := httptest.NewRequest(http.MethodPost, "/api/auth/login", strings.NewReader(`{"email":""}`))
 	rr := httptest.NewRecorder()
 

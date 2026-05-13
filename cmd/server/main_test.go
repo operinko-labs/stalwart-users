@@ -12,9 +12,7 @@ func TestNewServerHandlerRegistersPasswordChangeRoute(t *testing.T) {
 	t.Parallel()
 
 	handler, err := newServerHandler(serverConfig{
-		JWTSecret:          serverTestJWTSecret,
-		StalwartAdminToken: "admin-token",
-		StalwartURL:        "http://localhost:8080",
+		JWTSecret: serverTestJWTSecret,
 	}, nil)
 	if err != nil {
 		t.Fatalf("newServerHandler() error = %v", err)

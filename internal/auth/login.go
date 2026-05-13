@@ -11,14 +11,11 @@ import (
 
 type AuthenticatedUser struct {
 	Username string
+	IsAdmin  bool
 }
 
 type CredentialAuthenticator interface {
 	Authenticate(ctx context.Context, username, password string) (*AuthenticatedUser, error)
-}
-
-type AdminChecker interface {
-	IsAdmin(ctx context.Context, username string) bool
 }
 
 type SQLDirectoryAuthenticator struct {
@@ -60,8 +57,9 @@ func (a *SQLDirectoryAuthenticator) Authenticate(ctx context.Context, username, 
 	var name string
 	var secret string
 	var active bool
-	err := a.db.QueryRowContext(queryCtx, `SELECT name, secret, active FROM directory.accounts WHERE name = $1`, username).
-		Scan(&name, &secret, &active)
+	var isAdmin bool
+	err := a.db.QueryRowContext(queryCtx, `SELECT name, secret, active, is_admin FROM directory.accounts WHERE name = $1`, username).
+		Scan(&name, &secret, &active, &isAdmin)
 	if errors.Is(err, sql.ErrNoRows) {
 		passwordVerifier(password, dummyPasswordHash)
 		return nil, nil
@@ -79,10 +77,10 @@ func (a *SQLDirectoryAuthenticator) Authenticate(ctx context.Context, username, 
 		return nil, nil
 	}
 
-	return &AuthenticatedUser{Username: name}, nil
+	return &AuthenticatedUser{Username: name, IsAdmin: isAdmin}, nil
 }
 
-func LoginHandler(authenticator CredentialAuthenticator, tokens *TokenManager, adminChecker AdminChecker) http.HandlerFunc {
+func LoginHandler(authenticator CredentialAuthenticator, tokens *TokenManager) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		writeJSONHeader(w)
 
@@ -112,12 +110,7 @@ func LoginHandler(authenticator CredentialAuthenticator, tokens *TokenManager, a
 			return
 		}
 
-		isAdmin := false
-		if adminChecker != nil {
-			isAdmin = adminChecker.IsAdmin(r.Context(), user.Username)
-		}
-
-		token, err := tokens.GenerateToken(user.Username, isAdmin)
+		token, err := tokens.GenerateToken(user.Username, user.IsAdmin)
 		if err != nil {
 			writeJSONError(w, http.StatusInternalServerError, "failed to create session")
 			return
@@ -125,6 +118,6 @@ func LoginHandler(authenticator CredentialAuthenticator, tokens *TokenManager, a
 
 		tokens.SetCookie(w, token)
 		w.WriteHeader(http.StatusOK)
-		_ = json.NewEncoder(w).Encode(Session{Username: user.Username, IsAdmin: isAdmin})
+		_ = json.NewEncoder(w).Encode(Session{Username: user.Username, IsAdmin: user.IsAdmin})
 	}
 }

@@ -33,9 +33,7 @@ func main() {
 		log.Fatalf("Invalid PORT: %v", err)
 	}
 
-	if pathPrefix == "" {
-		pathPrefix = "/accounts"
-	}
+	// pathPrefix defaults to empty (dev mode); set PATH_PREFIX=/manage/api in production
 
 	if stalwartURL == "" {
 		stalwartURL = "http://localhost:8080"
@@ -106,7 +104,12 @@ func main() {
 
 	// Wrap API subrouter with auth middleware and mount under path prefix
 	authMiddleware := auth.JMAPAuthMiddleware(stalwartURL, adminUsersList, authBypassEnabled)
-	rootMux.Handle(pathPrefix+"/", authMiddleware(http.StripPrefix(pathPrefix, apiRouter)))
+	if pathPrefix != "" {
+		rootMux.Handle(pathPrefix+"/", authMiddleware(http.StripPrefix(pathPrefix, apiRouter)))
+	} else {
+		// Dev mode: mount API routes directly; specific API patterns beat GET /
+		rootMux.Handle("/", authMiddleware(apiRouter))
+	}
 
 	// Serve UI if configured (lowest priority)
 	if serveUI != "" {

@@ -300,15 +300,15 @@ export default function AccountsPage() {
               </div>
             </div>
             <div className="form-row">
-              <div className="form-group">
-                <label className="form-label">Description</label>
-                <input
-                  type="text"
-                  className="form-input"
-                  value={createData.description}
-                  onChange={(e) => setCreateData({ ...createData, description: e.target.value })}
-                />
-              </div>
+               <div className="form-group">
+                 <label className="form-label">Full Name</label>
+                 <input
+                   type="text"
+                   className="form-input"
+                   value={createData.description}
+                   onChange={(e) => setCreateData({ ...createData, description: e.target.value })}
+                 />
+               </div>
               <div className="form-group">
                 <label className="form-label">Type</label>
                 <select
@@ -345,13 +345,13 @@ export default function AccountsPage() {
           <table className="data-table">
             <thead>
               <tr>
-                <th>Name</th>
-                <th>Description</th>
-                <th>Type</th>
-                <th>Quota</th>
-                <th>Status</th>
-                <th>Actions</th>
-              </tr>
+                 <th>Name</th>
+                 <th>Full Name</th>
+                 <th>Type</th>
+                 <th>Quota</th>
+                 <th>Status</th>
+                 <th>Actions</th>
+               </tr>
             </thead>
             <tbody>
               {accounts.map((account) => (
@@ -406,16 +406,16 @@ export default function AccountsPage() {
           <div className="modal-content page-card">
             <h3>Edit Account: {editingAccount}</h3>
             {editError && <div className="error-banner">{editError}</div>}
-            <form onSubmit={handleEdit}>
-              <div className="form-group">
-                <label className="form-label">Description</label>
-                <input
-                  type="text"
-                  className="form-input"
-                  value={editData.description}
-                  onChange={(e) => setEditData({ ...editData, description: e.target.value })}
-                />
-              </div>
+             <form onSubmit={handleEdit}>
+               <div className="form-group">
+                 <label className="form-label">Full Name</label>
+                 <input
+                   type="text"
+                   className="form-input"
+                   value={editData.description}
+                   onChange={(e) => setEditData({ ...editData, description: e.target.value })}
+                 />
+               </div>
               <div className="form-group">
                 <label className="form-label">Quota (Bytes)</label>
                 <input

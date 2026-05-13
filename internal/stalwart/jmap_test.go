@@ -67,7 +67,7 @@ func TestCreateAccountSuccess(t *testing.T) {
 	client := NewClient(server.URL, "test-token")
 	client.httpClient = server.Client()
 
-	if err := client.CreateAccount(context.Background(), "alice@vaderrp.com", "plaintext-password"); err != nil {
+	if err := client.CreateAccount(context.Background(), "alice@vaderrp.com", "plaintext-password", "Alice User"); err != nil {
 		t.Fatalf("CreateAccount() error = %v", err)
 	}
 	if requestCount != 2 {
@@ -139,7 +139,7 @@ func TestCreateAccountDomainNotFound(t *testing.T) {
 	client := NewClient(server.URL, "test-token")
 	client.httpClient = server.Client()
 
-	err := client.CreateAccount(context.Background(), "alice@vaderrp.com", "plaintext-password")
+	err := client.CreateAccount(context.Background(), "alice@vaderrp.com", "plaintext-password", "Alice User")
 	if err == nil {
 		t.Fatal("CreateAccount() error = nil, want error")
 	}

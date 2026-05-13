@@ -105,16 +105,18 @@ type mockStalwartClient struct {
 	deleteErr   error
 	createdName string
 	createdPass string
+	createdDesc string
 	deletedName string
 	createCalls int
 	deleteCalls int
 	callOrder   *[]string
 }
 
-func (m *mockStalwartClient) CreateAccount(_ context.Context, name, password string) error {
+func (m *mockStalwartClient) CreateAccount(_ context.Context, name, password, description string) error {
 	m.createCalls++
 	m.createdName = name
 	m.createdPass = password
+	m.createdDesc = description
 	if m.callOrder != nil {
 		*m.callOrder = append(*m.callOrder, "stalwart.create")
 	}

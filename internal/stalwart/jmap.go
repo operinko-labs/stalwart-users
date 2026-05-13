@@ -63,7 +63,7 @@ func NewClient(baseURL, adminToken string) *Client {
 	}
 }
 
-func (c *Client) CreateAccount(ctx context.Context, name, password string) error {
+func (c *Client) CreateAccount(ctx context.Context, name, password, description string) error {
 	_ = password
 
 	localPart, domain, err := splitAddress(name)
@@ -83,6 +83,7 @@ func (c *Client) CreateAccount(ctx context.Context, name, password string) error
 				"@type":            "User",
 				"name":             localPart,
 				"domainId":         domainID,
+				"description":      description,
 				"credentials":      map[string]any{},
 				"memberGroupIds":   map[string]any{},
 				"roles":            map[string]any{"@type": "User"},

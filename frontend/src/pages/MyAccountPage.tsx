@@ -132,11 +132,11 @@ export default function MyAccountPage() {
 
     setIsSavingDesc(true)
     try {
-      await api.accounts.update(user.username, { description: editDescValue })
-      setAccount({ ...account, description: editDescValue })
-      setIsEditingDesc(false)
-    } catch (err: unknown) {
-      setError((err as Error).message || 'Failed to update description')
+       await api.accounts.update(user.username, { description: editDescValue })
+       setAccount({ ...account, description: editDescValue })
+       setIsEditingDesc(false)
+     } catch (err: unknown) {
+       setError((err as Error).message || 'Failed to update full name')
     } finally {
       setIsSavingDesc(false)
     }
@@ -184,8 +184,8 @@ export default function MyAccountPage() {
         </div>
 
         <div className="detail-item" style={{ marginTop: '1rem' }}>
-          <span className="detail-label">Description</span>
-          {isEditingDesc ? (
+           <span className="detail-label">Full Name</span>
+           {isEditingDesc ? (
             <div className="flex-row" style={{ marginTop: '0.5rem' }}>
               <div className="form-group">
                 <input
@@ -216,7 +216,7 @@ export default function MyAccountPage() {
             </div>
           ) : (
             <div style={{ display: 'flex', alignItems: 'center', gap: '1rem', marginTop: '0.25rem' }}>
-              <span className="detail-value">{account.description || <em style={{ color: '#64748b' }}>No description</em>}</span>
+              <span className="detail-value">{account.description || <em style={{ color: '#64748b' }}>No full name</em>}</span>
               <button
                 className="btn-primary"
                 style={{ padding: '0.25rem 0.75rem', fontSize: '0.75rem', width: 'auto' }}

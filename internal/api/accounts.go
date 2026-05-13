@@ -1,8 +1,10 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
+	"log"
 	"net/http"
 	"strings"
 
@@ -22,6 +24,11 @@ type accountsStore interface {
 	DeleteAccount(name string) error
 }
 
+type stalwartClient interface {
+	CreateAccount(ctx context.Context, name, password string) error
+	DeleteAccount(ctx context.Context, name string) error
+}
+
 func AccountsHandler(pool *db.Pool) http.HandlerFunc {
 	if pool == nil {
 		return databaseNotConfiguredHandler()
@@ -29,18 +36,18 @@ func AccountsHandler(pool *db.Pool) http.HandlerFunc {
 	return newAccountsHandler(pool)
 }
 
-func AccountHandler(pool *db.Pool) http.HandlerFunc {
+func AccountHandler(pool *db.Pool, jmap stalwartClient) http.HandlerFunc {
 	if pool == nil {
 		return databaseNotConfiguredHandler()
 	}
-	return newAccountHandler(pool)
+	return newAccountHandler(pool, jmap)
 }
 
-func CreateAccountHandler(pool *db.Pool) http.HandlerFunc {
+func CreateAccountHandler(pool *db.Pool, jmap stalwartClient) http.HandlerFunc {
 	if pool == nil {
 		return databaseNotConfiguredHandler()
 	}
-	return newCreateAccountHandler(pool)
+	return newCreateAccountHandler(pool, jmap)
 }
 
 func newAccountsHandler(store accountsStore) http.HandlerFunc {
@@ -58,7 +65,7 @@ func newAccountsHandler(store accountsStore) http.HandlerFunc {
 	}
 }
 
-func newAccountHandler(store accountsStore) http.HandlerFunc {
+func newAccountHandler(store accountsStore, jmap stalwartClient) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
 		case http.MethodGet:
@@ -66,7 +73,7 @@ func newAccountHandler(store accountsStore) http.HandlerFunc {
 		case http.MethodPatch:
 			handlePatchAccount(w, r, store)
 		case http.MethodDelete:
-			handleDeleteAccount(w, r, store)
+			handleDeleteAccount(w, r, store, jmap)
 		default:
 			writeJSONHeader(w)
 			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -74,7 +81,7 @@ func newAccountHandler(store accountsStore) http.HandlerFunc {
 	}
 }
 
-func newCreateAccountHandler(store accountsStore) http.HandlerFunc {
+func newCreateAccountHandler(store accountsStore, jmap stalwartClient) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		writeJSONHeader(w)
 
@@ -109,6 +116,12 @@ func newCreateAccountHandler(store accountsStore) http.HandlerFunc {
 			if err := store.InsertEmail(req.Name, req.Name, "primary"); err != nil {
 				writeError(w, http.StatusInternalServerError, err.Error())
 				return
+			}
+		}
+
+		if jmap != nil {
+			if err := jmap.CreateAccount(r.Context(), req.Name, req.Password); err != nil {
+				log.Printf("Failed to create Stalwart account for %s: %v", req.Name, err)
 			}
 		}
 
@@ -156,16 +169,23 @@ func handlePatchAccount(w http.ResponseWriter, r *http.Request, store accountsSt
 	_ = json.NewEncoder(w).Encode(map[string]string{"status": "updated"})
 }
 
-func handleDeleteAccount(w http.ResponseWriter, r *http.Request, store accountsStore) {
+func handleDeleteAccount(w http.ResponseWriter, r *http.Request, store accountsStore, jmap stalwartClient) {
 	writeJSONHeader(w)
+	name := r.PathValue("name")
 
-	if err := store.DeleteAccount(r.PathValue("name")); err != nil {
+	if err := store.DeleteAccount(name); err != nil {
 		if errors.Is(err, errAccountNotFound) {
 			writeError(w, http.StatusNotFound, "account not found")
 			return
 		}
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
+	}
+
+	if jmap != nil {
+		if err := jmap.DeleteAccount(r.Context(), name); err != nil {
+			log.Printf("Failed to delete Stalwart account for %s: %v", name, err)
+		}
 	}
 
 	w.WriteHeader(http.StatusNoContent)

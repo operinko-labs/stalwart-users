@@ -29,6 +29,29 @@ func TestNewServerHandlerRegistersPasswordChangeRoute(t *testing.T) {
 	}
 }
 
+func TestNewServerHandlerRegistersAccountRoutesWithOptionalStalwartConfig(t *testing.T) {
+	t.Parallel()
+
+	handler, err := newServerHandler(serverConfig{
+		JWTSecret:          serverTestJWTSecret,
+		StalwartURL:        "http://stalwart.internal",
+		StalwartAdminToken: "token",
+	}, nil)
+	if err != nil {
+		t.Fatalf("newServerHandler() error = %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/accounts/alice", nil)
+	req.AddCookie(&http.Cookie{Name: "token", Value: "invalid-token"})
+	rr := httptest.NewRecorder()
+
+	handler.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusUnauthorized {
+		t.Fatalf("status code = %d, want %d", rr.Code, http.StatusUnauthorized)
+	}
+}
+
 func TestCORSMiddlewareSetsHeaders(t *testing.T) {
 	t.Parallel()
 

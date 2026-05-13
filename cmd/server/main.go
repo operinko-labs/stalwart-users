@@ -11,16 +11,19 @@ import (
 	"github.com/operinko-labs/stalwart-users/internal/api"
 	"github.com/operinko-labs/stalwart-users/internal/auth"
 	"github.com/operinko-labs/stalwart-users/internal/db"
+	"github.com/operinko-labs/stalwart-users/internal/stalwart"
 )
 
 const apiBasePath = "/api"
 
 type serverConfig struct {
-	DatabaseURL         string
-	JWTSecret           string
-	PathPrefix          string
-	CORSOrigin          string
-	Port                int
+	DatabaseURL        string
+	JWTSecret          string
+	StalwartURL        string
+	StalwartAdminToken string
+	PathPrefix         string
+	CORSOrigin         string
+	Port               int
 }
 
 func main() {
@@ -36,6 +39,11 @@ func main() {
 	log.Printf("  CORS Origin: %s", cfg.CORSOrigin)
 	if cfg.DatabaseURL != "" {
 		log.Printf("  Database: configured")
+	}
+	if cfg.StalwartURL != "" && cfg.StalwartAdminToken != "" {
+		log.Printf("  Stalwart JMAP: configured (%s)", cfg.StalwartURL)
+	} else {
+		log.Printf("  Stalwart JMAP: disabled")
 	}
 
 	var pool *db.Pool
@@ -78,6 +86,8 @@ func loadConfigFromEnv() (serverConfig, error) {
 	cfg := serverConfig{
 		DatabaseURL:        os.Getenv("DATABASE_URL"),
 		JWTSecret:          os.Getenv("JWT_SECRET"),
+		StalwartURL:        os.Getenv("STALWART_URL"),
+		StalwartAdminToken: os.Getenv("STALWART_ADMIN_TOKEN"),
 		PathPrefix:         os.Getenv("PATH_PREFIX"),
 		CORSOrigin:         os.Getenv("CORS_ORIGIN"),
 		Port:               port,
@@ -101,6 +111,11 @@ func newServerHandler(cfg serverConfig, pool *db.Pool) (http.Handler, error) {
 
 	authenticator := auth.NewSQLDirectoryAuthenticator(dbFromPool(pool))
 
+	var stalwartClient *stalwart.Client
+	if cfg.StalwartURL != "" && cfg.StalwartAdminToken != "" {
+		stalwartClient = stalwart.NewClient(cfg.StalwartURL, cfg.StalwartAdminToken)
+	}
+
 	rootMux := http.NewServeMux()
 	rootMux.HandleFunc("GET /healthz", api.HealthHandler(pool))
 
@@ -112,14 +127,14 @@ func newServerHandler(cfg serverConfig, pool *db.Pool) (http.Handler, error) {
 
 	protectedRouter := http.NewServeMux()
 	protectedRouter.HandleFunc("GET /accounts", api.AccountsHandler(pool))
-	protectedRouter.HandleFunc("GET /accounts/{name}", api.AccountHandler(pool))
+	protectedRouter.HandleFunc("GET /accounts/{name}", api.AccountHandler(pool, stalwartClient))
 	protectedRouter.HandleFunc("GET /accounts/{name}/emails", api.ListEmailsHandler(pool))
 	protectedRouter.HandleFunc("GET /accounts/{name}/groups", api.ListGroupsHandler(pool))
-	protectedRouter.HandleFunc("POST /accounts", api.CreateAccountHandler(pool))
+	protectedRouter.HandleFunc("POST /accounts", api.CreateAccountHandler(pool, stalwartClient))
 	protectedRouter.HandleFunc("POST /accounts/{name}/emails", api.CreateEmailHandler(pool))
 	protectedRouter.HandleFunc("POST /accounts/{name}/groups", api.CreateGroupHandler(pool))
-	protectedRouter.HandleFunc("PATCH /accounts/{name}", api.AccountHandler(pool))
-	protectedRouter.HandleFunc("DELETE /accounts/{name}", api.AccountHandler(pool))
+	protectedRouter.HandleFunc("PATCH /accounts/{name}", api.AccountHandler(pool, stalwartClient))
+	protectedRouter.HandleFunc("DELETE /accounts/{name}", api.AccountHandler(pool, stalwartClient))
 	protectedRouter.HandleFunc("DELETE /accounts/{name}/emails/{address}", api.DeleteEmailHandler(pool))
 	protectedRouter.HandleFunc("DELETE /accounts/{name}/groups/{group}", api.DeleteGroupHandler(pool))
 

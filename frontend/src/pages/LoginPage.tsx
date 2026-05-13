@@ -45,16 +45,16 @@ export default function LoginPage() {
 
       <form onSubmit={handleSubmit}>
         <div className="form-group">
-          <label htmlFor="email" className="form-label">Email</label>
+          <label htmlFor="email" className="form-label">Username or email</label>
           <input
             id="email"
-            type="email"
+            type="text"
             className="form-input"
             value={email}
             onChange={(e) => setEmail(e.target.value)}
             required
             disabled={isSubmitting}
-            autoComplete="email"
+            autoComplete="username"
             autoFocus
           />
         </div>

@@ -134,8 +134,7 @@ func TestSQLDirectoryAuthenticatorReturnsNilForMissingUser(t *testing.T) {
 }
 
 func TestSQLDirectoryAuthenticatorUsesDummyVerificationForMissingOrInactiveUser(t *testing.T) {
-	t.Parallel()
-
+	// Not parallel: this test replaces the global passwordVerifier
 	originalVerifier := passwordVerifier
 	defer func() { passwordVerifier = originalVerifier }()
 

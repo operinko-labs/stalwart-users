@@ -46,13 +46,21 @@ func HashSSHA512(password string) (string, error) {
 // VerifyPassword verifies a password against an SSHA512 hash.
 // Returns true if the password matches, false otherwise.
 func VerifyPassword(password, encoded string) bool {
-	// Strip {SSHA512} prefix
-	if !hasPrefix(encoded, ssha512Prefix) {
-		return false
+	// Handle SSHA512 hashed passwords (case-insensitive prefix)
+	if hasPrefix(encoded, ssha512Prefix) || hasPrefix(encoded, "{ssha512}") {
+		return verifySsha512(password, encoded)
 	}
 
+	// Fallback: plaintext comparison (some Stalwart accounts use plaintext secrets)
+	return subtle.ConstantTimeCompare([]byte(password), []byte(encoded)) == 1
+}
+
+func verifySsha512(password, encoded string) bool {
+	// Strip prefix (handle both {SSHA512} and {ssha512})
+	prefixLen := len(ssha512Prefix)
+
 	// Base64 decode the remainder
-	decoded, err := base64.StdEncoding.DecodeString(encoded[len(ssha512Prefix):])
+	decoded, err := base64.StdEncoding.DecodeString(encoded[prefixLen:])
 	if err != nil {
 		return false
 	}

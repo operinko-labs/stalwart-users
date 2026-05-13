@@ -1,0 +1,216 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Stalwart Accounts Management</title>
+    <base href="/">
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div id="app-container">
+        <header>
+            <h1>Stalwart Accounts Management</h1>
+            <div id="auth-status">
+                <button id="btn-clear-token" class="btn btn-danger hidden">Logout</button>
+            </div>
+        </header>
+
+        <div id="banner-container"></div>
+
+        <main>
+            <!-- Login Section -->
+            <section id="login-section" class="card">
+                <h2>Authentication</h2>
+                <p>Please enter your Stalwart API Bearer token to continue.</p>
+                <div class="form-group">
+                    <label for="token-input">Bearer Token</label>
+                    <input type="text" id="token-input" placeholder="Enter token here..." autocomplete="off">
+                </div>
+                <div class="form-actions">
+                    <button id="btn-save-token" class="btn btn-primary">Save Token</button>
+                </div>
+            </section>
+
+            <!-- Main App Section -->
+            <section id="main-section" class="hidden">
+                <nav class="tabs">
+                    <button class="tab active" data-target="accounts">Accounts</button>
+                    <button class="tab" data-target="aliases">Aliases</button>
+                    <button class="tab" data-target="groups">Groups</button>
+                </nav>
+
+                <div id="tab-accounts" class="tab-content active">
+                    <div class="toolbar">
+                        <h2>Accounts</h2>
+                        <button id="btn-show-create-account" class="btn btn-primary">Create Account</button>
+                    </div>
+
+                    <!-- Create Account Form (Hidden by default) -->
+                    <div id="create-account-container" class="card hidden">
+                        <h3>Create New Account</h3>
+                        <form id="form-create-account">
+                            <div class="form-row">
+                                <div class="form-group">
+                                    <label for="acc-name">Name</label>
+                                    <input type="text" id="acc-name" required placeholder="e.g. user@domain.com">
+                                </div>
+                                <div class="form-group">
+                                    <label for="acc-password">Password</label>
+                                    <input type="password" id="acc-password" required>
+                                </div>
+                            </div>
+                            <div class="form-row">
+                                <div class="form-group">
+                                    <label for="acc-description">Description</label>
+                                    <input type="text" id="acc-description">
+                                </div>
+                                <div class="form-group">
+                                    <label for="acc-type">Type</label>
+                                    <select id="acc-type" required>
+                                        <option value="individual">Individual</option>
+                                        <option value="group">Group</option>
+                                    </select>
+                                </div>
+                                <div class="form-group">
+                                    <label for="acc-quota">Quota (bytes)</label>
+                                    <input type="number" id="acc-quota" value="0" min="0">
+                                </div>
+                            </div>
+                            <div class="form-actions">
+                                <button type="button" id="btn-cancel-create-account" class="btn btn-outlined">Cancel</button>
+                                <button type="submit" class="btn btn-primary">Create</button>
+                            </div>
+                        </form>
+                    </div>
+
+                    <div class="table-responsive">
+                        <table id="accounts-table">
+                            <thead>
+                                <tr>
+                                    <th>Name</th>
+                                    <th>Description</th>
+                                    <th>Type</th>
+                                    <th>Quota</th>
+                                    <th>Active</th>
+                                    <th>Actions</th>
+                                </tr>
+                            </thead>
+                            <tbody id="accounts-tbody">
+                                <!-- Rows will be populated by JS -->
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+
+                <div id="tab-aliases" class="tab-content">
+                    <div class="toolbar">
+                        <h2>Aliases</h2>
+                        <div class="form-group select-inline">
+                            <select id="alias-account-select">
+                                <option value="">Select account...</option>
+                            </select>
+                        </div>
+                    </div>
+
+                    <div id="aliases-content" class="hidden">
+                        <div class="toolbar">
+                            <h3>Emails</h3>
+                            <button id="btn-show-add-alias" class="btn btn-primary">Add Alias</button>
+                        </div>
+
+                        <!-- Add Alias Form -->
+                        <div id="add-alias-container" class="card hidden">
+                            <h3>Add New Alias</h3>
+                            <form id="form-add-alias">
+                                <div class="form-row">
+                                    <div class="form-group">
+                                        <label for="alias-address">Address</label>
+                                        <input type="text" id="alias-address" required placeholder="e.g. alias@domain.com">
+                                    </div>
+                                </div>
+                                <div class="form-actions">
+                                    <button type="button" id="btn-cancel-add-alias" class="btn btn-outlined">Cancel</button>
+                                    <button type="submit" class="btn btn-primary">Add</button>
+                                </div>
+                            </form>
+                        </div>
+
+                        <div class="table-responsive">
+                            <table id="aliases-table">
+                                <thead>
+                                    <tr>
+                                        <th>Address</th>
+                                        <th>Type</th>
+                                        <th>Actions</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="aliases-tbody">
+                                    <!-- Rows will be populated by JS -->
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                    <div id="aliases-empty-state" class="card">
+                        <p class="text-center text-muted">Select an account to manage aliases</p>
+                    </div>
+                </div>
+
+                <div id="tab-groups" class="tab-content">
+                    <div class="toolbar">
+                        <h2>Groups</h2>
+                        <div class="form-group select-inline">
+                            <select id="group-account-select">
+                                <option value="">Select account...</option>
+                            </select>
+                        </div>
+                    </div>
+
+                    <div id="groups-content" class="hidden">
+                        <div class="toolbar">
+                            <h3>Group Memberships</h3>
+                            <button id="btn-show-add-group" class="btn btn-primary">Add Group</button>
+                        </div>
+
+                        <!-- Add Group Form -->
+                        <div id="add-group-container" class="card hidden">
+                            <h3>Add to Group</h3>
+                            <form id="form-add-group">
+                                <div class="form-row">
+                                    <div class="form-group">
+                                        <label for="group-name">Group Name</label>
+                                        <input type="text" id="group-name" required placeholder="e.g. admins">
+                                    </div>
+                                </div>
+                                <div class="form-actions">
+                                    <button type="button" id="btn-cancel-add-group" class="btn btn-outlined">Cancel</button>
+                                    <button type="submit" class="btn btn-primary">Add</button>
+                                </div>
+                            </form>
+                        </div>
+
+                        <div class="table-responsive">
+                            <table id="groups-table">
+                                <thead>
+                                    <tr>
+                                        <th>Group Name</th>
+                                        <th>Actions</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="groups-tbody">
+                                    <!-- Rows will be populated by JS -->
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                    <div id="groups-empty-state" class="card">
+                        <p class="text-center text-muted">Select an account to manage groups</p>
+                    </div>
+                </div>
+            </section>
+        </main>
+    </div>
+
+    <script src="app.js"></script>
+</body>
+</html>

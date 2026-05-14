@@ -15,7 +15,7 @@ jobs:
       REGISTRY: ${{ secrets.HARBOR_URL }}
       IMAGE_PREFIX: ${{ secrets.HARBOR_URL }}/operinko-labs
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Create GitHub release
         uses: softprops/action-gh-release@v3

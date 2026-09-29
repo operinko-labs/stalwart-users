@@ -113,7 +113,7 @@ func TestAddressInUse(t *testing.T) {
 
 	for _, want := range []bool{true, false} {
 		pool, mock := newMockPool(t)
-		mock.ExpectQuery(regexp.QuoteMeta(`SELECT EXISTS (SELECT 1 FROM directory.emails WHERE lower(address) = lower($1))`)).
+		mock.ExpectQuery(regexp.QuoteMeta(`SELECT EXISTS (SELECT 1 FROM directory.emails WHERE lower(address) = lower($1)) OR EXISTS (SELECT 1 FROM directory.accounts WHERE lower(name) = lower($1))`)).
 			WithArgs("ceo@client.fi").
 			WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(want))
 

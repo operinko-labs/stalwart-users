@@ -9,7 +9,7 @@ on:
 
 jobs:
   test:
-    runs-on: org-runner
+    runs-on: ubuntu-latest
     env:
       CGO_ENABLED: "0"
     steps:
@@ -21,7 +21,7 @@ jobs:
       - run: go test ./...
 
   frontend:
-    runs-on: org-runner
+    runs-on: ubuntu-latest
     defaults:
       run:
         working-directory: frontend

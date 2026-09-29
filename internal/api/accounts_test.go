@@ -22,6 +22,7 @@ type mockAccountsStore struct {
 	insertEmailErr     error
 	updateAccountErr   error
 	deleteAccountErr   error
+	addressInUse       bool
 
 	createdName        string
 	createdSecret      string
@@ -82,6 +83,10 @@ func (m *mockAccountsStore) InsertEmail(name, address, emailType string) error {
 	return m.insertEmailErr
 }
 
+func (m *mockAccountsStore) AddressInUse(address string) (bool, error) {
+	return m.addressInUse, nil
+}
+
 func (m *mockAccountsStore) UpdateAccount(name string, description *string, quota *int, active *bool) error {
 	m.updateCalls++
 	m.updatedName = name
@@ -132,11 +137,161 @@ func (m *mockStalwartClient) DeleteAccount(_ context.Context, name string) error
 	return m.deleteErr
 }
 
+func asFullAdmin(req *http.Request) *http.Request {
+	return req.WithContext(auth.WithUser(req.Context(), "admin@example.com", true))
+}
+
+func asDomainAdmin(req *http.Request, domains ...string) *http.Request {
+	ctx := auth.WithUser(req.Context(), "dora@client.fi", false)
+	return req.WithContext(auth.WithAdminDomains(ctx, domains))
+}
+
+func TestAccountsHandlerListsOnlyManagedDomainsForDomainAdmins(t *testing.T) {
+	t.Parallel()
+
+	store := &mockAccountsStore{listAccountsResult: []model.Account{
+		{Name: "admin"},
+		{Name: "boss@client.fi", IsAdmin: true},
+		{Name: "bob@client.fi"},
+		{Name: "carl@Client2.fi"},
+		{Name: "eve@other.fi"},
+	}}
+	req := asDomainAdmin(httptest.NewRequest(http.MethodGet, "/accounts", nil), "client.fi", "client2.fi")
+	rr := httptest.NewRecorder()
+
+	newAccountsHandler(store).ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status code = %d, want %d", rr.Code, http.StatusOK)
+	}
+	var accounts []model.Account
+	if err := json.Unmarshal(rr.Body.Bytes(), &accounts); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+	if len(accounts) != 2 || accounts[0].Name != "bob@client.fi" || accounts[1].Name != "carl@Client2.fi" {
+		t.Fatalf("accounts = %#v, want bob@client.fi and carl@Client2.fi", accounts)
+	}
+}
+
+func TestCreateAccountHandlerAllowsDomainAdminsOnTheirDomains(t *testing.T) {
+	t.Parallel()
+
+	for _, accountType := range []string{"", "individual", "group"} {
+		t.Run("type "+accountType, func(t *testing.T) {
+			t.Parallel()
+
+			store := &mockAccountsStore{}
+			body := strings.NewReader(`{"name":"bob@client.fi","password":"secret","type":"` + accountType + `"}`)
+			req := asDomainAdmin(httptest.NewRequest(http.MethodPost, "/accounts", body), "client.fi")
+			rr := httptest.NewRecorder()
+
+			newCreateAccountHandler(store, nil).ServeHTTP(rr, req)
+
+			if rr.Code != http.StatusCreated {
+				t.Fatalf("status code = %d, want %d; body=%s", rr.Code, http.StatusCreated, rr.Body.String())
+			}
+			if store.createCalls != 1 || store.createdName != "bob@client.fi" {
+				t.Fatalf("CreateAccount calls=%d name=%q, want 1/bob@client.fi", store.createCalls, store.createdName)
+			}
+		})
+	}
+}
+
+func TestCreateAccountHandlerRejectsDomainAdminRequestsOutsideTheirRights(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		body string
+	}{
+		{name: "other domain", body: `{"name":"eve@other.fi","password":"secret"}`},
+		{name: "no domain", body: `{"name":"eve","password":"secret"}`},
+		{name: "quota", body: `{"name":"bob@client.fi","password":"secret","quota":1024}`},
+		{name: "admin type", body: `{"name":"bob@client.fi","password":"secret","type":"admin"}`},
+		{name: "domain type", body: `{"name":"bob@client.fi","password":"secret","type":"domain"}`},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			store := &mockAccountsStore{}
+			stalwart := &mockStalwartClient{}
+			req := asDomainAdmin(httptest.NewRequest(http.MethodPost, "/accounts", strings.NewReader(tt.body)), "client.fi")
+			rr := httptest.NewRecorder()
+
+			newCreateAccountHandler(store, stalwart).ServeHTTP(rr, req)
+
+			if rr.Code != http.StatusForbidden {
+				t.Fatalf("status code = %d, want %d; body=%s", rr.Code, http.StatusForbidden, rr.Body.String())
+			}
+			if store.createCalls != 0 || stalwart.createCalls != 0 {
+				t.Fatalf("create calls db=%d stalwart=%d, want none", store.createCalls, stalwart.createCalls)
+			}
+		})
+	}
+}
+
+func TestCreateAccountHandlerRejectsAddressesInUseForDomainAdmins(t *testing.T) {
+	t.Parallel()
+
+	store := &mockAccountsStore{addressInUse: true}
+	stalwart := &mockStalwartClient{}
+	body := strings.NewReader(`{"name":"ceo@client.fi","password":"secret"}`)
+	req := asDomainAdmin(httptest.NewRequest(http.MethodPost, "/accounts", body), "client.fi")
+	rr := httptest.NewRecorder()
+
+	newCreateAccountHandler(store, stalwart).ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusConflict {
+		t.Fatalf("status code = %d, want %d", rr.Code, http.StatusConflict)
+	}
+	if store.createCalls != 0 || stalwart.createCalls != 0 {
+		t.Fatalf("create calls db=%d stalwart=%d, want none", store.createCalls, stalwart.createCalls)
+	}
+}
+
+func TestAccountHandlerRejectsQuotaChangesFromNonAdmins(t *testing.T) {
+	t.Parallel()
+
+	store := &mockAccountsStore{}
+	req := asDomainAdmin(httptest.NewRequest(http.MethodPatch, "/accounts/bob@client.fi", strings.NewReader(`{"quota":0}`)), "client.fi")
+	req.SetPathValue("name", "bob@client.fi")
+	rr := httptest.NewRecorder()
+
+	newAccountHandler(store, nil).ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("status code = %d, want %d", rr.Code, http.StatusForbidden)
+	}
+	if store.updateCalls != 0 {
+		t.Fatalf("UpdateAccount calls = %d, want 0", store.updateCalls)
+	}
+}
+
+func TestAccountHandlerLetsNonAdminsPatchWithoutQuota(t *testing.T) {
+	t.Parallel()
+
+	store := &mockAccountsStore{}
+	req := asDomainAdmin(httptest.NewRequest(http.MethodPatch, "/accounts/bob@client.fi", strings.NewReader(`{"description":"Bob","active":false}`)), "client.fi")
+	req.SetPathValue("name", "bob@client.fi")
+	rr := httptest.NewRecorder()
+
+	newAccountHandler(store, nil).ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status code = %d, want %d", rr.Code, http.StatusOK)
+	}
+	if store.updateCalls != 1 {
+		t.Fatalf("UpdateAccount calls = %d, want 1", store.updateCalls)
+	}
+}
+
 func TestAccountsHandlerListsAccounts(t *testing.T) {
 	t.Parallel()
 
 	store := &mockAccountsStore{listAccountsResult: []model.Account{{Name: "alice", Description: "Alice", Type: "individual", Quota: 10, Active: true}}}
-	req := httptest.NewRequest(http.MethodGet, "/accounts", nil)
+	req := asFullAdmin(httptest.NewRequest(http.MethodGet, "/accounts", nil))
 	rr := httptest.NewRecorder()
 
 	newAccountsHandler(store).ServeHTTP(rr, req)
@@ -165,7 +320,7 @@ func TestAccountsHandlerListsAccounts(t *testing.T) {
 func TestAccountsHandlerReturnsServerErrorWhenListFails(t *testing.T) {
 	t.Parallel()
 
-	req := httptest.NewRequest(http.MethodGet, "/accounts", nil)
+	req := asFullAdmin(httptest.NewRequest(http.MethodGet, "/accounts", nil))
 	rr := httptest.NewRecorder()
 
 	newAccountsHandler(&mockAccountsStore{listAccountsErr: errors.New("boom")}).ServeHTTP(rr, req)
@@ -217,7 +372,7 @@ func TestCreateAccountHandlerValidatesRequiredFields(t *testing.T) {
 	t.Parallel()
 
 	body := strings.NewReader(`{"name":"","password":""}`)
-	req := httptest.NewRequest(http.MethodPost, "/accounts", body)
+	req := asFullAdmin(httptest.NewRequest(http.MethodPost, "/accounts", body))
 	rr := httptest.NewRecorder()
 
 	newCreateAccountHandler(&mockAccountsStore{}, nil).ServeHTTP(rr, req)
@@ -232,7 +387,7 @@ func TestCreateAccountHandlerCreatesAccountWithDefaultTypeAndHash(t *testing.T) 
 
 	store := &mockAccountsStore{}
 	body := strings.NewReader(`{"name":"alice","password":"secret","description":"Alice","quota":25}`)
-	req := httptest.NewRequest(http.MethodPost, "/accounts", body)
+	req := asFullAdmin(httptest.NewRequest(http.MethodPost, "/accounts", body))
 	rr := httptest.NewRecorder()
 
 	newCreateAccountHandler(store, nil).ServeHTTP(rr, req)
@@ -262,7 +417,7 @@ func TestCreateAccountHandlerAddsPrimaryEmailForAddressNames(t *testing.T) {
 
 	store := &mockAccountsStore{}
 	body := strings.NewReader(`{"name":"alice@example.com","password":"secret"}`)
-	req := httptest.NewRequest(http.MethodPost, "/accounts", body)
+	req := asFullAdmin(httptest.NewRequest(http.MethodPost, "/accounts", body))
 	rr := httptest.NewRecorder()
 
 	newCreateAccountHandler(store, nil).ServeHTTP(rr, req)
@@ -282,7 +437,7 @@ func TestAccountHandlerPatchesAccount(t *testing.T) {
 	t.Parallel()
 
 	body := strings.NewReader(`{"description":"Updated","quota":42,"active":false}`)
-	req := httptest.NewRequest(http.MethodPatch, "/accounts/alice", body)
+	req := asFullAdmin(httptest.NewRequest(http.MethodPatch, "/accounts/alice", body))
 	req.SetPathValue("name", "alice")
 	rr := httptest.NewRecorder()
 	store := &mockAccountsStore{}
@@ -362,7 +517,7 @@ func TestCreateAccountHandlerCallsJMAP(t *testing.T) {
 	store := &mockAccountsStore{callOrder: &order}
 	stalwart := &mockStalwartClient{callOrder: &order}
 	body := strings.NewReader(`{"name":"alice@example.com","password":"secret"}`)
-	req := httptest.NewRequest(http.MethodPost, "/accounts", body)
+	req := asFullAdmin(httptest.NewRequest(http.MethodPost, "/accounts", body))
 	rr := httptest.NewRecorder()
 
 	newCreateAccountHandler(store, stalwart).ServeHTTP(rr, req)
@@ -387,7 +542,7 @@ func TestCreateAccountHandlerReturnsErrorWhenJMAPFails(t *testing.T) {
 	store := &mockAccountsStore{}
 	stalwart := &mockStalwartClient{createErr: errors.New("stalwart unavailable")}
 	body := strings.NewReader(`{"name":"alice@example.com","password":"secret"}`)
-	req := httptest.NewRequest(http.MethodPost, "/accounts", body)
+	req := asFullAdmin(httptest.NewRequest(http.MethodPost, "/accounts", body))
 	rr := httptest.NewRecorder()
 
 	newCreateAccountHandler(store, stalwart).ServeHTTP(rr, req)
@@ -410,7 +565,7 @@ func TestCreateAccountHandlerRollsBackOnDBFailure(t *testing.T) {
 	store := &mockAccountsStore{createAccountErr: errors.New("db unavailable"), callOrder: &order}
 	stalwart := &mockStalwartClient{callOrder: &order}
 	body := strings.NewReader(`{"name":"alice@example.com","password":"secret"}`)
-	req := httptest.NewRequest(http.MethodPost, "/accounts", body)
+	req := asFullAdmin(httptest.NewRequest(http.MethodPost, "/accounts", body))
 	rr := httptest.NewRecorder()
 
 	newCreateAccountHandler(store, stalwart).ServeHTTP(rr, req)

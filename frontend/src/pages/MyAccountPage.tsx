@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { api, type Account } from '../api/client'
+import { api, managesDomain, type Account } from '../api/client'
 import { useAuth } from '../contexts/useAuth'
 
 export default function MyAccountPage() {
@@ -141,6 +141,9 @@ export default function MyAccountPage() {
       setIsSavingDesc(false)
     }
   }
+
+  // Only admins of this account's domain may add or remove its addresses.
+  const canEditAliases = managesDomain(user, user?.username ?? '')
 
   if (isLoading) {
     return <div className="page-status">Loading account details...</div>
@@ -286,7 +289,11 @@ export default function MyAccountPage() {
 
       <section className="page-card page-section">
         <h2>Email Aliases</h2>
-        <p style={{ marginBottom: '1.5rem' }}>Manage email addresses associated with your account.</p>
+        <p style={{ marginBottom: '1.5rem' }}>
+          {canEditAliases
+            ? 'Manage email addresses associated with your account.'
+            : 'Email addresses associated with your account. Ask your administrator to add or remove addresses.'}
+        </p>
 
         {aliasError && <div className="error-banner">{aliasError}</div>}
 
@@ -300,7 +307,7 @@ export default function MyAccountPage() {
                     <span>{alias}</span>
                     {isPrimary && <span className="alias-badge">Primary</span>}
                   </div>
-                  {!isPrimary && (
+                  {!isPrimary && canEditAliases && (
                     <button
                       className="btn-danger"
                       onClick={() => handleRemoveAlias(alias)}
@@ -318,6 +325,7 @@ export default function MyAccountPage() {
           <p style={{ color: '#94a3b8', marginBottom: '1.5rem' }}>No aliases found.</p>
         )}
 
+        {canEditAliases && (
         <form onSubmit={handleAddAlias} className="flex-row">
           <div className="form-group">
             <label className="form-label" htmlFor="newAlias">Add New Alias</label>
@@ -340,6 +348,7 @@ export default function MyAccountPage() {
             {isAddingAlias ? 'Adding...' : 'Add Alias'}
           </button>
         </form>
+        )}
       </section>
     </div>
   )

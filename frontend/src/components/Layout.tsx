@@ -1,4 +1,5 @@
 import { NavLink, Outlet } from 'react-router-dom'
+import { canManageAccounts } from '../api/client'
 import { useAuth } from '../contexts/useAuth'
 
 export default function Layout() {
@@ -20,7 +21,7 @@ export default function Layout() {
       </header>
 
       <nav className="app-nav" aria-label="Primary">
-        {user?.isAdmin ? <NavLink to="/accounts">Accounts</NavLink> : null}
+        {canManageAccounts(user) ? <NavLink to="/accounts">Accounts</NavLink> : null}
         <NavLink to="/account">My account</NavLink>
       </nav>
 

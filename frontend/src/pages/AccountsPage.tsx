@@ -1,7 +1,11 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { api, type Account } from '../api/client'
+import { useAuth } from '../contexts/useAuth'
 
 export default function AccountsPage() {
+  const { user } = useAuth()
+  // Domain admins only see their domains' accounts and can't set quota.
+  const isAdmin = !!user?.isAdmin
   const [accounts, setAccounts] = useState<Account[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -20,10 +24,18 @@ export default function AccountsPage() {
 
   // Edit state
   const [editingAccount, setEditingAccount] = useState<string | null>(null)
-  const [editData, setEditData] = useState({
+  const editingRef = useRef<string | null>(null)
+  const [editData, setEditData] = useState<{
+    description: string
+    quota: string
+    active: boolean
+    // Comma-separated; null until loaded, so an early save can't clear them.
+    adminDomains: string | null
+  }>({
     description: '',
     quota: '',
     active: true,
+    adminDomains: null,
   })
   const [editError, setEditError] = useState<string | null>(null)
   const [editLoading, setEditLoading] = useState(false)
@@ -84,7 +96,7 @@ export default function AccountsPage() {
         password: createData.password,
         description: createData.description,
         type: createData.type,
-        quota: createData.quota ? parseInt(createData.quota, 10) : 0,
+        ...(isAdmin ? { quota: createData.quota ? parseInt(createData.quota, 10) : 0 } : {}),
       })
       setShowCreate(false)
       setCreateData({ name: '', password: '', description: '', type: 'individual', quota: '' })
@@ -102,8 +114,20 @@ export default function AccountsPage() {
       description: account.description,
       quota: account.quota ? account.quota.toString() : '',
       active: account.active,
+      adminDomains: null,
     })
     setEditError(null)
+    editingRef.current = account.name
+    if (isAdmin) {
+      api.accounts.adminDomains(account.name)
+        .then(domains => {
+          // Ignore a late answer for an account whose dialog was since replaced.
+          if (editingRef.current === account.name) {
+            setEditData(data => ({ ...data, adminDomains: domains.join(', ') }))
+          }
+        })
+        .catch((err: unknown) => setEditError(err instanceof Error ? err.message : String(err)))
+    }
   }
 
   const handleEdit = async (e: React.FormEvent) => {
@@ -114,9 +138,15 @@ export default function AccountsPage() {
     try {
       await api.accounts.update(editingAccount, {
         description: editData.description,
-        quota: editData.quota ? parseInt(editData.quota, 10) : 0,
+        ...(isAdmin ? { quota: editData.quota ? parseInt(editData.quota, 10) : 0 } : {}),
         active: editData.active,
       })
+      if (isAdmin && editData.adminDomains !== null) {
+        await api.accounts.setAdminDomains(
+          editingAccount,
+          editData.adminDomains.split(/[\s,]+/).filter(Boolean),
+        )
+      }
       setEditingAccount(null)
       await fetchAccounts()
     } catch (err: unknown) {
@@ -270,6 +300,10 @@ export default function AccountsPage() {
         </button>
       </div>
 
+      {!isAdmin && user && (
+        <p>Domains you manage: {user.adminDomains.join(', ')}</p>
+      )}
+
       {error && <div className="error-banner">{error}</div>}
 
       {showCreate && (
@@ -317,19 +351,25 @@ export default function AccountsPage() {
                   onChange={(e) => setCreateData({ ...createData, type: e.target.value })}
                 >
                   <option value="individual">Individual</option>
-                  <option value="domain">Domain</option>
+                  {isAdmin ? (
+                    <option value="domain">Domain</option>
+                  ) : (
+                    <option value="group">Group</option>
+                  )}
                 </select>
               </div>
-              <div className="form-group">
-                <label className="form-label">Quota (Bytes)</label>
-                <input
-                  type="number"
-                  className="form-input"
-                  placeholder="Leave empty for unlimited"
-                  value={createData.quota}
-                  onChange={(e) => setCreateData({ ...createData, quota: e.target.value })}
-                />
-              </div>
+              {isAdmin && (
+                <div className="form-group">
+                  <label className="form-label">Quota (Bytes)</label>
+                  <input
+                    type="number"
+                    className="form-input"
+                    placeholder="Leave empty for unlimited"
+                    value={createData.quota}
+                    onChange={(e) => setCreateData({ ...createData, quota: e.target.value })}
+                  />
+                </div>
+              )}
             </div>
             <button type="submit" className="btn-primary" disabled={createLoading}>
               {createLoading ? 'Creating...' : 'Create Account'}
@@ -416,16 +456,31 @@ export default function AccountsPage() {
                    onChange={(e) => setEditData({ ...editData, description: e.target.value })}
                  />
                </div>
-              <div className="form-group">
-                <label className="form-label">Quota (Bytes)</label>
-                <input
-                  type="number"
-                  className="form-input"
-                  placeholder="Leave empty for unlimited"
-                  value={editData.quota}
-                  onChange={(e) => setEditData({ ...editData, quota: e.target.value })}
-                />
-              </div>
+              {isAdmin && (
+                <div className="form-group">
+                  <label className="form-label">Quota (Bytes)</label>
+                  <input
+                    type="number"
+                    className="form-input"
+                    placeholder="Leave empty for unlimited"
+                    value={editData.quota}
+                    onChange={(e) => setEditData({ ...editData, quota: e.target.value })}
+                  />
+                </div>
+              )}
+              {isAdmin && (
+                <div className="form-group">
+                  <label className="form-label">Manages domains</label>
+                  <input
+                    type="text"
+                    className="form-input"
+                    placeholder={editData.adminDomains === null ? 'Loading…' : 'e.g. client.fi, client2.fi'}
+                    disabled={editData.adminDomains === null}
+                    value={editData.adminDomains ?? ''}
+                    onChange={(e) => setEditData({ ...editData, adminDomains: e.target.value })}
+                  />
+                </div>
+              )}
               <div className="form-group checkbox-group">
                 <label className="form-label">
                   <input

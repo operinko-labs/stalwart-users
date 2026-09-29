@@ -6,6 +6,9 @@ type Account struct {
 	Type        string `json:"type"`
 	Quota       int    `json:"quota"`
 	Active      bool   `json:"active"`
+	// IsAdmin is only filled by ListAccounts, to hide full admins from domain
+	// admins; it is never sent to clients.
+	IsAdmin bool `json:"-"`
 }
 
 type CreateAccountRequest struct {

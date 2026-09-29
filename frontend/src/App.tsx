@@ -1,4 +1,5 @@
 import { Navigate, Route, Routes } from 'react-router-dom'
+import { canManageAccounts } from './api/client'
 import ProtectedRoute from './components/ProtectedRoute'
 import Layout from './components/Layout'
 import { useAuth } from './contexts/useAuth'
@@ -18,7 +19,7 @@ function HomeRedirect() {
     return <Navigate to="/login" replace />
   }
 
-  return <Navigate to={user.isAdmin ? '/accounts' : '/account'} replace />
+  return <Navigate to={canManageAccounts(user) ? '/accounts' : '/account'} replace />
 }
 
 function App() {
@@ -36,7 +37,7 @@ function App() {
         <Route
           path="/accounts"
           element={
-            <ProtectedRoute requireAdmin>
+            <ProtectedRoute requireManager>
               <AccountsPage />
             </ProtectedRoute>
           }

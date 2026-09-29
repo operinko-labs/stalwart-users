@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 
+	"github.com/operinko-labs/stalwart-users/internal/auth"
 	"github.com/operinko-labs/stalwart-users/internal/db"
 	"github.com/operinko-labs/stalwart-users/internal/model"
 )
@@ -16,6 +17,7 @@ type groupsStore interface {
 	AddGroup(name, memberOf string) error
 	RemoveGroup(name, memberOf string) error
 	GetAccount(name string) (*model.Account, error)
+	auth.AccessStore
 }
 
 type createGroupRequest struct {
@@ -79,6 +81,20 @@ func newCreateGroupHandler(store groupsStore) http.HandlerFunc {
 		if req.MemberOf == "" {
 			writeError(w, http.StatusBadRequest, "member_of is required")
 			return
+		}
+
+		// Membership grants access to the group's mailbox, so the group must be
+		// an account the domain admin could manage anyway.
+		if !auth.IsAdminFromContext(r.Context()) {
+			allowed, err := auth.CanManageAccount(r.Context(), store, req.MemberOf)
+			if err != nil {
+				writeError(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+			if !allowed {
+				writeError(w, http.StatusForbidden, "you can only use groups on domains you manage")
+				return
+			}
 		}
 
 		if err := store.AddGroup(r.PathValue("name"), req.MemberOf); err != nil {

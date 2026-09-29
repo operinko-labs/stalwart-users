@@ -8,6 +8,16 @@ import (
 	"github.com/operinko-labs/stalwart-users/internal/model"
 )
 
+// AddressInUse reports whether any account already has the address.
+func (p *Pool) AddressInUse(address string) (bool, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	var inUse bool
+	err := p.DB().QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM directory.emails WHERE lower(address) = lower($1))`, address).Scan(&inUse)
+	return inUse, err
+}
+
 func (p *Pool) ListEmails(name string) ([]model.Email, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()

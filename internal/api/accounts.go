@@ -22,6 +22,7 @@ type accountsStore interface {
 	InsertEmail(name, address, emailType string) error
 	UpdateAccount(name string, description *string, quota *int, active *bool) error
 	DeleteAccount(name string) error
+	AddressInUse(address string) (bool, error)
 }
 
 type stalwartClient interface {
@@ -60,6 +61,16 @@ func newAccountsHandler(store accountsStore) http.HandlerFunc {
 			return
 		}
 
+		if !auth.IsAdminFromContext(r.Context()) {
+			managed := make([]model.Account, 0, len(accounts))
+			for _, account := range accounts {
+				if !account.IsAdmin && auth.ManagesDomain(r.Context(), auth.DomainOf(account.Name)) {
+					managed = append(managed, account)
+				}
+			}
+			accounts = managed
+		}
+
 		w.WriteHeader(http.StatusOK)
 		_ = json.NewEncoder(w).Encode(accounts)
 	}
@@ -94,6 +105,32 @@ func newCreateAccountHandler(store accountsStore, jmap stalwartClient) http.Hand
 		if req.Name == "" || req.Password == "" {
 			writeError(w, http.StatusBadRequest, "name and password are required")
 			return
+		}
+
+		if !auth.IsAdminFromContext(r.Context()) {
+			switch {
+			case !auth.ManagesDomain(r.Context(), auth.DomainOf(req.Name)):
+				writeError(w, http.StatusForbidden, "you can only create accounts on domains you manage")
+				return
+			case req.Quota != 0:
+				writeError(w, http.StatusForbidden, "only full admins can set quota")
+				return
+			case req.Type != "" && req.Type != "individual" && req.Type != "group":
+				writeError(w, http.StatusForbidden, "you can only create individual or group accounts")
+				return
+			}
+
+			// The new account's name becomes its primary address, which must not
+			// already deliver to someone else.
+			inUse, err := store.AddressInUse(req.Name)
+			if err != nil {
+				writeError(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+			if inUse {
+				writeError(w, http.StatusConflict, "address already in use")
+				return
+			}
 		}
 
 		secret, err := auth.HashPassword(req.Password)
@@ -159,6 +196,11 @@ func handlePatchAccount(w http.ResponseWriter, r *http.Request, store accountsSt
 	var req model.UpdateAccountRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	if req.Quota != nil && !auth.IsAdminFromContext(r.Context()) {
+		writeError(w, http.StatusForbidden, "only full admins can change quota")
 		return
 	}
 

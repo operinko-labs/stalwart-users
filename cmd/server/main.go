@@ -57,6 +57,9 @@ func main() {
 				log.Printf("Failed to close database pool: %v", err)
 			}
 		}()
+		if err := pool.EnsureDomainAdminsTable(); err != nil {
+			log.Fatalf("Failed to create domain admins table: %v", err)
+		}
 	}
 
 	handler, err := newServerHandler(cfg, pool)
@@ -116,16 +119,24 @@ func newServerHandler(cfg serverConfig, pool *db.Pool) (http.Handler, error) {
 		stalwartClient = stalwart.NewClient(cfg.StalwartURL, cfg.StalwartAdminToken)
 	}
 
+	// A nil *db.Pool must not become a non-nil interface value.
+	var access auth.AccessStore
+	if pool != nil {
+		access = pool
+	}
+
 	rootMux := http.NewServeMux()
 	rootMux.HandleFunc("GET /healthz", api.HealthHandler(pool))
 
 	apiRouter := http.NewServeMux()
 	apiRouter.HandleFunc("POST /auth/login", auth.LoginHandler(authenticator, tokens))
-	apiRouter.HandleFunc("GET /auth/me", auth.MeHandler(tokens))
+	apiRouter.HandleFunc("GET /auth/me", auth.MeHandler(tokens, access))
 	apiRouter.HandleFunc("POST /auth/logout", auth.LogoutHandler(tokens))
-	apiRouter.Handle("PUT /accounts/{name}/password", tokens.Middleware(api.ChangePasswordHandler(pool)))
 
 	protectedRouter := http.NewServeMux()
+	protectedRouter.HandleFunc("PUT /accounts/{name}/password", api.ChangePasswordHandler(pool))
+	protectedRouter.HandleFunc("GET /accounts/{name}/admin-domains", api.AdminDomainsHandler(pool))
+	protectedRouter.HandleFunc("PUT /accounts/{name}/admin-domains", api.AdminDomainsHandler(pool))
 	protectedRouter.HandleFunc("GET /accounts", api.AccountsHandler(pool))
 	protectedRouter.HandleFunc("GET /accounts/{name}", api.AccountHandler(pool, stalwartClient))
 	protectedRouter.HandleFunc("GET /accounts/{name}/emails", api.ListEmailsHandler(pool))
@@ -138,7 +149,7 @@ func newServerHandler(cfg serverConfig, pool *db.Pool) (http.Handler, error) {
 	protectedRouter.HandleFunc("DELETE /accounts/{name}/emails/{address}", api.DeleteEmailHandler(pool))
 	protectedRouter.HandleFunc("DELETE /accounts/{name}/groups/{group}", api.DeleteGroupHandler(pool))
 
-	apiRouter.Handle("/", tokens.Middleware(auth.AuthorizationMiddleware(protectedRouter)))
+	apiRouter.Handle("/", tokens.Middleware(auth.AuthorizationMiddleware(protectedRouter, access)))
 	rootMux.Handle(apiBasePath+"/", http.StripPrefix(apiBasePath, apiRouter))
 
 	if cfg.PathPrefix != "" {

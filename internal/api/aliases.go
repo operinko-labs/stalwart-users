@@ -6,6 +6,7 @@ import (
 	"net/http"
 
 	"github.com/lib/pq"
+	"github.com/operinko-labs/stalwart-users/internal/auth"
 	"github.com/operinko-labs/stalwart-users/internal/db"
 	"github.com/operinko-labs/stalwart-users/internal/model"
 )
@@ -16,6 +17,7 @@ type aliasesStore interface {
 	GetEmailType(name, address string) (string, error)
 	DeleteEmail(name, address string) error
 	GetAccount(name string) (*model.Account, error)
+	AddressInUse(address string) (bool, error)
 }
 
 func ListEmailsHandler(pool *db.Pool) http.HandlerFunc {
@@ -80,6 +82,28 @@ func newCreateEmailHandler(store aliasesStore) http.HandlerFunc {
 		emailType := req.Type
 		if emailType == "" {
 			emailType = "alias"
+		}
+
+		if !auth.IsAdminFromContext(r.Context()) {
+			if !auth.ManagesDomain(r.Context(), auth.DomainOf(req.Address)) {
+				writeError(w, http.StatusForbidden, "you can only add addresses on domains you manage")
+				return
+			}
+			if emailType != "alias" && emailType != "list" {
+				writeError(w, http.StatusForbidden, "you can only add alias or list addresses")
+				return
+			}
+			// A shared address delivers to every account holding it, so only
+			// full admins may reuse one.
+			inUse, err := store.AddressInUse(req.Address)
+			if err != nil {
+				writeError(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+			if inUse {
+				writeError(w, http.StatusConflict, "address already in use")
+				return
+			}
 		}
 
 		if err := store.InsertEmail(r.PathValue("name"), req.Address, emailType); err != nil {

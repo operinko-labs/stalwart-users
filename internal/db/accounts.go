@@ -17,7 +17,7 @@ func (p *Pool) ListAccounts() ([]model.Account, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	rows, err := p.DB().QueryContext(ctx, `SELECT name, description, type, quota, active FROM directory.accounts ORDER BY name`)
+	rows, err := p.DB().QueryContext(ctx, `SELECT name, description, type, quota, active, COALESCE(is_admin, false) FROM directory.accounts ORDER BY name`)
 	if err != nil {
 		return nil, err
 	}
@@ -26,7 +26,7 @@ func (p *Pool) ListAccounts() ([]model.Account, error) {
 	accounts := make([]model.Account, 0)
 	for rows.Next() {
 		var account model.Account
-		if err := rows.Scan(&account.Name, &account.Description, &account.Type, &account.Quota, &account.Active); err != nil {
+		if err := rows.Scan(&account.Name, &account.Description, &account.Type, &account.Quota, &account.Active, &account.IsAdmin); err != nil {
 			return nil, err
 		}
 		accounts = append(accounts, account)
@@ -177,6 +177,9 @@ func (p *Pool) DeleteAccount(name string) error {
 		return err
 	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM directory.emails WHERE name = $1`, name); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM directory.domain_admins WHERE name = $1`, name); err != nil {
 		return err
 	}
 

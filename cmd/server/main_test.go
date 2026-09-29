@@ -4,6 +4,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+
+	"github.com/operinko-labs/stalwart-users/internal/auth"
 )
 
 const serverTestJWTSecret = "0123456789abcdef0123456789abcdef"
@@ -26,6 +28,57 @@ func TestNewServerHandlerRegistersPasswordChangeRoute(t *testing.T) {
 
 	if rr.Code != http.StatusUnauthorized {
 		t.Fatalf("status code = %d, want %d", rr.Code, http.StatusUnauthorized)
+	}
+}
+
+func TestNewServerHandlerAuthorizesRoutes(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		method   string
+		path     string
+		username string
+		isAdmin  bool
+		want     int
+	}{
+		// 503 means the request reached its handler, which has no database here.
+		{name: "admin reads admin domains", method: http.MethodGet, path: "/api/accounts/dora@client.fi/admin-domains", username: "admin@example.com", isAdmin: true, want: http.StatusServiceUnavailable},
+		{name: "admin sets admin domains", method: http.MethodPut, path: "/api/accounts/dora@client.fi/admin-domains", username: "admin@example.com", isAdmin: true, want: http.StatusServiceUnavailable},
+		{name: "user reads own admin domains", method: http.MethodGet, path: "/api/accounts/bob@client.fi/admin-domains", username: "bob@client.fi", want: http.StatusForbidden},
+		{name: "user changes own password", method: http.MethodPut, path: "/api/accounts/bob@client.fi/password", username: "bob@client.fi", want: http.StatusServiceUnavailable},
+		{name: "user changes another password", method: http.MethodPut, path: "/api/accounts/eve@client.fi/password", username: "bob@client.fi", want: http.StatusForbidden},
+		{name: "user adds own address", method: http.MethodPost, path: "/api/accounts/bob@client.fi/emails", username: "bob@client.fi", want: http.StatusForbidden},
+	}
+
+	handler, err := newServerHandler(serverConfig{JWTSecret: serverTestJWTSecret}, nil)
+	if err != nil {
+		t.Fatalf("newServerHandler() error = %v", err)
+	}
+	tokens, err := auth.NewTokenManager(serverTestJWTSecret)
+	if err != nil {
+		t.Fatalf("NewTokenManager() error = %v", err)
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			token, err := tokens.GenerateToken(tt.username, tt.isAdmin)
+			if err != nil {
+				t.Fatalf("GenerateToken() error = %v", err)
+			}
+
+			req := httptest.NewRequest(tt.method, tt.path, nil)
+			req.AddCookie(&http.Cookie{Name: "token", Value: token})
+			rr := httptest.NewRecorder()
+
+			handler.ServeHTTP(rr, req)
+
+			if rr.Code != tt.want {
+				t.Fatalf("status code = %d, want %d; body=%s", rr.Code, tt.want, rr.Body.String())
+			}
+		})
 	}
 }
 

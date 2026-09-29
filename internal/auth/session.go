@@ -5,7 +5,7 @@ import (
 	"net/http"
 )
 
-func MeHandler(tokens *TokenManager) http.HandlerFunc {
+func MeHandler(tokens *TokenManager, store AccessStore) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		writeJSONHeader(w)
 
@@ -20,9 +20,24 @@ func MeHandler(tokens *TokenManager) http.HandlerFunc {
 			return
 		}
 
+		domains := []string{}
+		if !session.IsAdmin && store != nil {
+			found, err := store.ListAdminDomains(session.Username)
+			if err != nil {
+				writeJSONError(w, http.StatusInternalServerError, "failed to load permissions")
+				return
+			}
+			domains = append(domains, found...)
+		}
+
 		w.WriteHeader(http.StatusOK)
-		_ = json.NewEncoder(w).Encode(session)
+		_ = json.NewEncoder(w).Encode(meResponse{Session: *session, AdminDomains: domains})
 	}
+}
+
+type meResponse struct {
+	Session
+	AdminDomains []string `json:"adminDomains"`
 }
 
 func LogoutHandler(tokens *TokenManager) http.HandlerFunc {

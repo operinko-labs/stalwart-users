@@ -31,7 +31,8 @@ func newChangePasswordHandler(store passwordsStore) http.HandlerFunc {
 		username := auth.UsernameFromContext(r.Context())
 		isAdmin := auth.IsAdminFromContext(r.Context())
 
-		if !isAdmin && username != name {
+		isSelf := username == name
+		if !isAdmin && !isSelf && !auth.ManagesDomain(r.Context(), auth.DomainOf(name)) {
 			writeError(w, http.StatusForbidden, "forbidden")
 			return
 		}
@@ -47,7 +48,7 @@ func newChangePasswordHandler(store passwordsStore) http.HandlerFunc {
 			return
 		}
 
-		if !isAdmin {
+		if !isAdmin && isSelf {
 			if req.CurrentPassword == "" {
 				writeError(w, http.StatusBadRequest, "current_password is required")
 				return

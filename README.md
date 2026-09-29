@@ -10,7 +10,10 @@ This project provides a management interface for Stalwart mail server's SQL dire
 
 - **Backend**: Go service listening on port 3000.
 - **Authentication**: Validates JMAP sessions against the Stalwart server's `/jmap/session` endpoint.
-- **Authorization**: Access is restricted to users listed in the `ADMIN_USERS` environment variable.
+- **Authorization**: Three roles.
+  - **Full admins** (`directory.accounts.is_admin`) can do everything.
+  - **Domain admins** manage the accounts on the domains assigned to them in `directory.domain_admins` (created by the app on startup; full admins edit it via `/accounts/{name}/admin-domains`). They can create, edit, delete and reset passwords for those accounts, and manage their addresses and groups on those domains. They cannot set quotas, touch full admins, grant any admin rights, or act on a peer domain admin who manages a domain they don't.
+  - **Everyone else** can view their own account, edit its full name and change their own password; their addresses are read-only.
 - **Frontend**: Vanilla HTML/JS/CSS SPA. In production, it is served by Stalwart's Applications feature.
 - **Ingress**: API requests are typically proxied via a Gateway API HTTPRoute.
 
@@ -30,6 +33,9 @@ This project provides a management interface for Stalwart mail server's SQL dire
 | DELETE | `/accounts/{name}` | Delete an account (cascades to aliases and groups) |
 | DELETE | `/accounts/{name}/emails/{address}` | Remove an email alias |
 | DELETE | `/accounts/{name}/groups/{group}` | Remove an account from a group |
+| PUT | `/accounts/{name}/password` | Change a password (own password needs `current_password`) |
+| GET | `/accounts/{name}/admin-domains` | List the domains an account administers (full admins only) |
+| PUT | `/accounts/{name}/admin-domains` | Replace the domains an account administers (full admins only) |
 
 ## Environment variables
 

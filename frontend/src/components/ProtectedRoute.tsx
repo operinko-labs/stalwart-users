@@ -1,13 +1,14 @@
 import type { ReactNode } from 'react'
 import { Navigate } from 'react-router-dom'
+import { canManageAccounts } from '../api/client'
 import { useAuth } from '../contexts/useAuth'
 
 type ProtectedRouteProps = {
   children: ReactNode
-  requireAdmin?: boolean
+  requireManager?: boolean
 }
 
-export default function ProtectedRoute({ children, requireAdmin = false }: ProtectedRouteProps) {
+export default function ProtectedRoute({ children, requireManager = false }: ProtectedRouteProps) {
   const { isLoading, user } = useAuth()
 
   if (isLoading) {
@@ -18,7 +19,7 @@ export default function ProtectedRoute({ children, requireAdmin = false }: Prote
     return <Navigate to="/login" replace />
   }
 
-  if (requireAdmin && !user.isAdmin) {
+  if (requireManager && !canManageAccounts(user)) {
     return <Navigate to="/account" replace />
   }
 

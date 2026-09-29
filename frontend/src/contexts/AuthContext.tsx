@@ -34,8 +34,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, [])
 
   const login = useCallback(async (email: string, password: string) => {
-    const nextUser = await api.auth.login(email, password)
-    setUser(nextUser)
+    await api.auth.login(email, password)
+    // The login response has no admin domains; /auth/me does.
+    setUser(await api.auth.me())
   }, [])
 
   const logout = useCallback(async () => {

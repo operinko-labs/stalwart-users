@@ -50,6 +50,17 @@ func (m *mockGroupsStore) RemoveGroup(name, memberOf string) error {
 	return m.removeGroupErr
 }
 
+func (m *mockGroupsStore) IsAdmin(name string) (bool, error) {
+	return name == "boss@client.fi", nil
+}
+
+func (m *mockGroupsStore) ListAdminDomains(name string) ([]string, error) {
+	if name == "pam@client.fi" {
+		return []string{"client.fi", "other.fi"}, nil
+	}
+	return nil, nil
+}
+
 func (m *mockGroupsStore) GetAccount(name string) (*model.Account, error) {
 	m.getAccountCalls++
 	if m.getAccountResult != nil {
@@ -93,7 +104,7 @@ func TestCreateGroupHandlerCreatesMembership(t *testing.T) {
 	t.Parallel()
 
 	store := &mockGroupsStore{getAccountResult: &model.Account{Name: "alice"}}
-	req := httptest.NewRequest(http.MethodPost, "/accounts/alice/groups", strings.NewReader(`{"member_of":"admins"}`))
+	req := asFullAdmin(httptest.NewRequest(http.MethodPost, "/accounts/alice/groups", strings.NewReader(`{"member_of":"admins"}`)))
 	req.SetPathValue("name", "alice")
 	rr := httptest.NewRecorder()
 
@@ -107,6 +118,48 @@ func TestCreateGroupHandlerCreatesMembership(t *testing.T) {
 	}
 	if store.addedName != "alice" || store.addedMemberOf != "admins" {
 		t.Fatalf("added group = (%q, %q), want (alice, admins)", store.addedName, store.addedMemberOf)
+	}
+}
+
+func TestCreateGroupHandlerLetsDomainAdminsUseGroupsOnTheirDomains(t *testing.T) {
+	t.Parallel()
+
+	store := &mockGroupsStore{getAccountResult: &model.Account{Name: "bob@client.fi"}}
+	req := asDomainAdmin(httptest.NewRequest(http.MethodPost, "/accounts/bob@client.fi/groups", strings.NewReader(`{"member_of":"team@client.fi"}`)), "client.fi")
+	req.SetPathValue("name", "bob@client.fi")
+	rr := httptest.NewRecorder()
+
+	newCreateGroupHandler(store).ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("status code = %d, want %d; body=%s", rr.Code, http.StatusCreated, rr.Body.String())
+	}
+	if store.addCalls != 1 {
+		t.Fatalf("AddGroup calls = %d, want 1", store.addCalls)
+	}
+}
+
+func TestCreateGroupHandlerRejectsGroupsOutsideManagedDomains(t *testing.T) {
+	t.Parallel()
+
+	for _, group := range []string{"staff@other.fi", "admins", "boss@client.fi", "pam@client.fi"} {
+		t.Run(group, func(t *testing.T) {
+			t.Parallel()
+
+			store := &mockGroupsStore{getAccountResult: &model.Account{Name: "bob@client.fi"}}
+			req := asDomainAdmin(httptest.NewRequest(http.MethodPost, "/accounts/bob@client.fi/groups", strings.NewReader(`{"member_of":"`+group+`"}`)), "client.fi")
+			req.SetPathValue("name", "bob@client.fi")
+			rr := httptest.NewRecorder()
+
+			newCreateGroupHandler(store).ServeHTTP(rr, req)
+
+			if rr.Code != http.StatusForbidden {
+				t.Fatalf("status code = %d, want %d", rr.Code, http.StatusForbidden)
+			}
+			if store.addCalls != 0 {
+				t.Fatalf("AddGroup calls = %d, want 0", store.addCalls)
+			}
+		})
 	}
 }
 

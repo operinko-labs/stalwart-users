@@ -132,6 +132,64 @@ func TestChangePasswordHandlerRejectsNonAdminChangingAnotherUser(t *testing.T) {
 	}
 }
 
+func TestChangePasswordHandlerLetsDomainAdminsResetWithoutCurrentPassword(t *testing.T) {
+	t.Parallel()
+
+	store := &mockPasswordsStore{}
+	rr := httptest.NewRecorder()
+
+	serveDomainAdminPasswordRequest(store, rr, "bob@client.fi", `{"new_password":"new-password"}`)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status code = %d, want %d; body=%s", rr.Code, http.StatusOK, rr.Body.String())
+	}
+	if store.getSecretCalls != 0 {
+		t.Fatalf("GetAccountSecret calls = %d, want 0", store.getSecretCalls)
+	}
+	if store.updateCalls != 1 || store.updatedName != "bob@client.fi" {
+		t.Fatalf("UpdateAccountPassword calls=%d name=%q, want 1/bob@client.fi", store.updateCalls, store.updatedName)
+	}
+}
+
+func TestChangePasswordHandlerRequiresCurrentPasswordForDomainAdminsOwnAccount(t *testing.T) {
+	t.Parallel()
+
+	store := &mockPasswordsStore{}
+	rr := httptest.NewRecorder()
+
+	serveDomainAdminPasswordRequest(store, rr, "dora@client.fi", `{"new_password":"new-password"}`)
+
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("status code = %d, want %d", rr.Code, http.StatusBadRequest)
+	}
+	if store.updateCalls != 0 {
+		t.Fatalf("UpdateAccountPassword calls = %d, want 0", store.updateCalls)
+	}
+}
+
+func TestChangePasswordHandlerRejectsDomainAdminsOutsideTheirDomains(t *testing.T) {
+	t.Parallel()
+
+	store := &mockPasswordsStore{}
+	rr := httptest.NewRecorder()
+
+	serveDomainAdminPasswordRequest(store, rr, "eve@other.fi", `{"new_password":"new-password"}`)
+
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("status code = %d, want %d", rr.Code, http.StatusForbidden)
+	}
+	if store.updateCalls != 0 {
+		t.Fatalf("UpdateAccountPassword calls = %d, want 0", store.updateCalls)
+	}
+}
+
+func serveDomainAdminPasswordRequest(store passwordsStore, rr *httptest.ResponseRecorder, name, body string) {
+	req := asDomainAdmin(httptest.NewRequest(http.MethodPut, "/accounts/"+name+"/password", strings.NewReader(body)), "client.fi")
+	req.SetPathValue("name", name)
+
+	newChangePasswordHandler(store).ServeHTTP(rr, req)
+}
+
 func TestChangePasswordHandlerReturnsNotFoundWhenAccountMissing(t *testing.T) {
 	t.Parallel()
 

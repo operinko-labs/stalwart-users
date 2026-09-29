@@ -30,6 +30,21 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
 export type AuthUser = {
   username: string
   isAdmin: boolean
+  adminDomains: string[]
+}
+
+export function domainOf(name: string): string {
+  const at = name.lastIndexOf('@')
+  return at < 0 ? '' : name.slice(at + 1).toLowerCase()
+}
+
+// Full admins and domain admins can both use the Accounts page.
+export function canManageAccounts(user: AuthUser | null): boolean {
+  return !!user && (user.isAdmin || user.adminDomains.length > 0)
+}
+
+export function managesDomain(user: AuthUser | null, name: string): boolean {
+  return !!user && (user.isAdmin || user.adminDomains.includes(domainOf(name)))
 }
 
 export type Account = {
@@ -69,6 +84,17 @@ export const api = {
           new_password: newPassword,
         }),
       }),
+    adminDomains: async (name: string) => {
+      const data = await request<{ domains: string[] }>(`/accounts/${encodeURIComponent(name)}/admin-domains`)
+      return data.domains
+    },
+    setAdminDomains: async (name: string, domains: string[]) => {
+      const data = await request<{ domains: string[] }>(`/accounts/${encodeURIComponent(name)}/admin-domains`, {
+        method: 'PUT',
+        body: JSON.stringify({ domains }),
+      })
+      return data.domains
+    },
   },
   emails: {
     list: async (name: string) => {

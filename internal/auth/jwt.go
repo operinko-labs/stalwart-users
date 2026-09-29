@@ -144,9 +144,7 @@ func (m *TokenManager) Middleware(next http.Handler) http.Handler {
 			return
 		}
 
-		ctx := context.WithValue(r.Context(), usernameKey, session.Username)
-		ctx = context.WithValue(ctx, isAdminKey, session.IsAdmin)
-		next.ServeHTTP(w, r.WithContext(ctx))
+		next.ServeHTTP(w, r.WithContext(WithUser(r.Context(), session.Username, session.IsAdmin)))
 	})
 }
 

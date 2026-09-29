@@ -19,6 +19,7 @@ type mockAliasesStore struct {
 	deleteEmailErr   error
 	getAccountResult *model.Account
 	getAccountErr    error
+	addressInUse     bool
 
 	insertedName    string
 	insertedAddress string
@@ -58,6 +59,10 @@ func (m *mockAliasesStore) DeleteEmail(name, address string) error {
 	m.deletedName = name
 	m.deletedAddress = address
 	return m.deleteEmailErr
+}
+
+func (m *mockAliasesStore) AddressInUse(address string) (bool, error) {
+	return m.addressInUse, nil
 }
 
 func (m *mockAliasesStore) GetAccount(name string) (*model.Account, error) {
@@ -103,7 +108,7 @@ func TestCreateEmailHandlerCreatesAliasWithDefaultType(t *testing.T) {
 	t.Parallel()
 
 	store := &mockAliasesStore{getAccountResult: &model.Account{Name: "alice"}}
-	req := httptest.NewRequest(http.MethodPost, "/accounts/alice/emails", strings.NewReader(`{"address":"alias@example.com"}`))
+	req := asFullAdmin(httptest.NewRequest(http.MethodPost, "/accounts/alice/emails", strings.NewReader(`{"address":"alias@example.com"}`)))
 	req.SetPathValue("name", "alice")
 	rr := httptest.NewRecorder()
 
@@ -127,7 +132,7 @@ func TestCreateEmailHandlerReturnsConflictOnDuplicate(t *testing.T) {
 		getAccountResult: &model.Account{Name: "alice"},
 		insertEmailErr:   &pq.Error{Code: "23505"},
 	}
-	req := httptest.NewRequest(http.MethodPost, "/accounts/alice/emails", strings.NewReader(`{"address":"alias@example.com","type":"alias"}`))
+	req := asFullAdmin(httptest.NewRequest(http.MethodPost, "/accounts/alice/emails", strings.NewReader(`{"address":"alias@example.com","type":"alias"}`)))
 	req.SetPathValue("name", "alice")
 	rr := httptest.NewRecorder()
 
@@ -215,6 +220,113 @@ func TestEmailHandlersReturnNotFoundForMissingAccount(t *testing.T) {
 				t.Fatalf("status code = %d, want %d", rr.Code, http.StatusNotFound)
 			}
 		})
+	}
+}
+
+func TestCreateEmailHandlerLetsDomainAdminsAddAddressesOnTheirDomains(t *testing.T) {
+	t.Parallel()
+
+	store := &mockAliasesStore{getAccountResult: &model.Account{Name: "bob@client.fi"}}
+	req := asDomainAdmin(httptest.NewRequest(http.MethodPost, "/accounts/bob@client.fi/emails", strings.NewReader(`{"address":"Sales@Client.fi"}`)), "client.fi")
+	req.SetPathValue("name", "bob@client.fi")
+	rr := httptest.NewRecorder()
+
+	newCreateEmailHandler(store).ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("status code = %d, want %d; body=%s", rr.Code, http.StatusCreated, rr.Body.String())
+	}
+	if store.insertCalls != 1 {
+		t.Fatalf("InsertEmail calls = %d, want 1", store.insertCalls)
+	}
+}
+
+func TestCreateEmailHandlerRejectsAddressesOutsideManagedDomains(t *testing.T) {
+	t.Parallel()
+
+	for _, address := range []string{"postmaster@other.fi", "postmaster"} {
+		t.Run(address, func(t *testing.T) {
+			t.Parallel()
+
+			store := &mockAliasesStore{getAccountResult: &model.Account{Name: "bob@client.fi"}}
+			req := asDomainAdmin(httptest.NewRequest(http.MethodPost, "/accounts/bob@client.fi/emails", strings.NewReader(`{"address":"`+address+`"}`)), "client.fi")
+			req.SetPathValue("name", "bob@client.fi")
+			rr := httptest.NewRecorder()
+
+			newCreateEmailHandler(store).ServeHTTP(rr, req)
+
+			if rr.Code != http.StatusForbidden {
+				t.Fatalf("status code = %d, want %d", rr.Code, http.StatusForbidden)
+			}
+			if store.insertCalls != 0 {
+				t.Fatalf("InsertEmail calls = %d, want 0", store.insertCalls)
+			}
+		})
+	}
+}
+
+func TestCreateEmailHandlerLimitsDomainAdminsToAliasAndListTypes(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		emailType string
+		want      int
+	}{
+		{emailType: "", want: http.StatusCreated},
+		{emailType: "alias", want: http.StatusCreated},
+		{emailType: "list", want: http.StatusCreated},
+		{emailType: "primary", want: http.StatusForbidden},
+	}
+
+	for _, tt := range tests {
+		t.Run("type "+tt.emailType, func(t *testing.T) {
+			t.Parallel()
+
+			store := &mockAliasesStore{getAccountResult: &model.Account{Name: "bob@client.fi"}}
+			body := `{"address":"sales@client.fi","type":"` + tt.emailType + `"}`
+			req := asDomainAdmin(httptest.NewRequest(http.MethodPost, "/accounts/bob@client.fi/emails", strings.NewReader(body)), "client.fi")
+			req.SetPathValue("name", "bob@client.fi")
+			rr := httptest.NewRecorder()
+
+			newCreateEmailHandler(store).ServeHTTP(rr, req)
+
+			if rr.Code != tt.want {
+				t.Fatalf("status code = %d, want %d; body=%s", rr.Code, tt.want, rr.Body.String())
+			}
+		})
+	}
+}
+
+func TestCreateEmailHandlerRejectsAddressesInUseForDomainAdmins(t *testing.T) {
+	t.Parallel()
+
+	store := &mockAliasesStore{getAccountResult: &model.Account{Name: "bob@client.fi"}, addressInUse: true}
+	req := asDomainAdmin(httptest.NewRequest(http.MethodPost, "/accounts/bob@client.fi/emails", strings.NewReader(`{"address":"ceo@client.fi"}`)), "client.fi")
+	req.SetPathValue("name", "bob@client.fi")
+	rr := httptest.NewRecorder()
+
+	newCreateEmailHandler(store).ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusConflict {
+		t.Fatalf("status code = %d, want %d", rr.Code, http.StatusConflict)
+	}
+	if store.insertCalls != 0 {
+		t.Fatalf("InsertEmail calls = %d, want 0", store.insertCalls)
+	}
+}
+
+func TestCreateEmailHandlerLetsFullAdminsShareAddresses(t *testing.T) {
+	t.Parallel()
+
+	store := &mockAliasesStore{getAccountResult: &model.Account{Name: "bob@client.fi"}, addressInUse: true}
+	req := asFullAdmin(httptest.NewRequest(http.MethodPost, "/accounts/bob@client.fi/emails", strings.NewReader(`{"address":"team@client.fi","type":"list"}`)))
+	req.SetPathValue("name", "bob@client.fi")
+	rr := httptest.NewRecorder()
+
+	newCreateEmailHandler(store).ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("status code = %d, want %d", rr.Code, http.StatusCreated)
 	}
 }
 

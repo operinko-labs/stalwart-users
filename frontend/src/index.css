@@ -441,18 +441,6 @@ button {
   color: #cbd5e1;
 }
 
-.badge-success {
-  background: rgba(16, 185, 129, 0.2);
-  color: #34d399;
-  border: 1px solid rgba(16, 185, 129, 0.3);
-}
-
-.badge-error {
-  background: rgba(239, 68, 68, 0.2);
-  color: #f87171;
-  border: 1px solid rgba(239, 68, 68, 0.3);
-}
-
 .action-buttons {
   display: flex;
   gap: 0.5rem;

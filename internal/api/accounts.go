@@ -137,7 +137,7 @@ func handleGetAccount(w http.ResponseWriter, r *http.Request, store accountsStor
 
 	account, err := store.GetAccount(r.PathValue("name"))
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeStoreError(w, err)
 		return
 	}
 	if account == nil {

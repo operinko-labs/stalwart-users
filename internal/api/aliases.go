@@ -135,7 +135,7 @@ func newDeleteEmailHandler(store aliasesStore) http.HandlerFunc {
 func accountExists(w http.ResponseWriter, r *http.Request, store aliasesStore) bool {
 		account, err := store.GetAccount(r.PathValue("name"))
 		if err != nil {
-			writeError(w, http.StatusInternalServerError, err.Error())
+			writeStoreError(w, err)
 			return false
 		}
 		if account == nil {

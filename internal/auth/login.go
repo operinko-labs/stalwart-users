@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
-	"strings"
 )
 
 type AuthenticatedUser struct {
@@ -37,7 +36,7 @@ func NewStalwartAuthenticator(checker credentialChecker, admins AccessStore) *St
 }
 
 func (a *StalwartAuthenticator) Authenticate(ctx context.Context, username, password string) (*AuthenticatedUser, error) {
-	username = strings.ToLower(strings.TrimSpace(username))
+	username = CanonicalName(username)
 
 	ok, err := a.checker.Authenticate(ctx, username, password)
 	if err != nil || !ok {

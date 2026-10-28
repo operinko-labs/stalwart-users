@@ -190,6 +190,20 @@ func TestChangePasswordHandlerRequiresCurrentPasswordForDomainAdminsOwnAccount(t
 	}
 }
 
+func TestChangePasswordHandlerTreatsMixedCaseOwnAccountAsSelf(t *testing.T) {
+	t.Parallel()
+
+	store := &mockPasswordsStore{}
+	rr := httptest.NewRecorder()
+
+	serveDomainAdminPasswordRequest(store, rr, "Dora@Client.fi", `{"new_password":"new-password"}`)
+
+	assertError(t, rr, http.StatusBadRequest, "current_password is required")
+	if store.updateCalls != 0 {
+		t.Fatalf("SetPassword calls = %d, want 0", store.updateCalls)
+	}
+}
+
 func TestChangePasswordHandlerRejectsDomainAdminsOutsideTheirDomains(t *testing.T) {
 	t.Parallel()
 

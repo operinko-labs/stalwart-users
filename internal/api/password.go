@@ -27,7 +27,7 @@ func newChangePasswordHandler(store passwordsStore) http.HandlerFunc {
 		username := auth.UsernameFromContext(r.Context())
 		isAdmin := auth.IsAdminFromContext(r.Context())
 
-		isSelf := username == name
+		isSelf := auth.CanonicalName(username) == auth.CanonicalName(name)
 		if !isAdmin && !isSelf && !auth.ManagesDomain(r.Context(), auth.DomainOf(name)) {
 			writeError(w, http.StatusForbidden, "forbidden")
 			return

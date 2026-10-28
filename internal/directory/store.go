@@ -73,6 +73,8 @@ func (s *Store) ListAccounts() ([]model.Account, error) {
 
 // GetAccount returns nil, nil when no user has the given address.
 func (s *Store) GetAccount(name string) (*model.Account, error) {
+	name = auth.CanonicalName(name)
+
 	account, err := s.find(name)
 	if err != nil || account == nil {
 		return nil, err
@@ -83,6 +85,8 @@ func (s *Store) GetAccount(name string) (*model.Account, error) {
 }
 
 func (s *Store) CreateAccount(name, password, description, accountType string, quota int) error {
+	name = auth.CanonicalName(name)
+
 	if accountType == "group" {
 		return fmt.Errorf("%w: groups can't be created", ErrUnsupported)
 	}
@@ -94,6 +98,8 @@ func (s *Store) CreateAccount(name, password, description, accountType string, q
 }
 
 func (s *Store) UpdateAccount(name string, description *string, quota *int, active *bool) error {
+	name = auth.CanonicalName(name)
+
 	if active != nil && !*active {
 		return fmt.Errorf("%w: accounts can't be disabled", ErrUnsupported)
 	}
@@ -128,6 +134,8 @@ func (s *Store) UpdateAccount(name string, description *string, quota *int, acti
 }
 
 func (s *Store) DeleteAccount(name string) error {
+	name = auth.CanonicalName(name)
+
 	account, err := s.find(name)
 	if err != nil {
 		return err
@@ -149,6 +157,8 @@ func (s *Store) DeleteAccount(name string) error {
 // IsAdmin reports whether the account holds an admin role in Stalwart; unknown
 // accounts are not admins.
 func (s *Store) IsAdmin(name string) (bool, error) {
+	name = auth.CanonicalName(name)
+
 	account, err := s.find(name)
 	if err != nil || account == nil {
 		return false, err
@@ -159,6 +169,8 @@ func (s *Store) IsAdmin(name string) (bool, error) {
 
 // Authenticate checks the credentials against Stalwart.
 func (s *Store) Authenticate(ctx context.Context, name, password string) (bool, error) {
+	name = auth.CanonicalName(name)
+
 	ctx, cancel := context.WithTimeout(ctx, callTimeout)
 	defer cancel()
 
@@ -168,6 +180,8 @@ func (s *Store) Authenticate(ctx context.Context, name, password string) (bool, 
 // SetPassword sends the new plaintext password to Stalwart, which hashes it and
 // enforces its password policy.
 func (s *Store) SetPassword(name, password string) error {
+	name = auth.CanonicalName(name)
+
 	account, err := s.find(name)
 	if err != nil {
 		return err
@@ -183,11 +197,11 @@ func (s *Store) SetPassword(name, password string) error {
 }
 
 func (s *Store) ListAdminDomains(name string) ([]string, error) {
-	return s.admins.ListAdminDomains(name)
+	return s.admins.ListAdminDomains(auth.CanonicalName(name))
 }
 
 func (s *Store) SetAdminDomains(name string, domains []string) error {
-	return s.admins.SetAdminDomains(name, domains)
+	return s.admins.SetAdminDomains(auth.CanonicalName(name), domains)
 }
 
 func (s *Store) find(name string) (*stalwart.Account, error) {
@@ -217,6 +231,8 @@ var ErrAddressInUse = errors.New("address already in use")
 // ListEmails returns the primary address first, then the aliases sorted by
 // address.
 func (s *Store) ListEmails(name string) ([]model.Email, error) {
+	name = auth.CanonicalName(name)
+
 	account, aliases, err := s.findWithAliases(name)
 	if err != nil {
 		return nil, err
@@ -237,6 +253,9 @@ func (s *Store) ListEmails(name string) ([]model.Email, error) {
 
 // InsertEmail adds an alias; Stalwart accounts have a single primary address.
 func (s *Store) InsertEmail(name, address, emailType string) error {
+	name = auth.CanonicalName(name)
+	address = auth.CanonicalName(address)
+
 	if emailType != "" && emailType != "alias" {
 		return fmt.Errorf("%w: only alias addresses can be added", ErrUnsupported)
 	}
@@ -298,6 +317,9 @@ func (s *Store) InsertEmail(name, address, emailType string) error {
 // GetEmailType returns "primary", "alias", or "" when the address is not on the
 // account.
 func (s *Store) GetEmailType(name, address string) (string, error) {
+	name = auth.CanonicalName(name)
+	address = auth.CanonicalName(address)
+
 	account, aliases, err := s.findWithAliases(name)
 	if err != nil {
 		return "", err
@@ -318,6 +340,9 @@ func (s *Store) GetEmailType(name, address string) (string, error) {
 // DeleteEmail removes an alias. An address that is not on the account is a
 // no-op; the primary address cannot be removed.
 func (s *Store) DeleteEmail(name, address string) error {
+	name = auth.CanonicalName(name)
+	address = auth.CanonicalName(address)
+
 	account, aliases, err := s.findWithAliases(name)
 	if err != nil {
 		return err
@@ -341,6 +366,8 @@ func (s *Store) DeleteEmail(name, address string) error {
 // AddressInUse reports whether any account, user or group, has the address as
 // its primary address or an alias.
 func (s *Store) AddressInUse(address string) (bool, error) {
+	address = auth.CanonicalName(address)
+
 	ctx, cancel := context.WithTimeout(context.Background(), callTimeout)
 	defer cancel()
 
@@ -358,6 +385,8 @@ func (s *Store) AddressInUse(address string) (bool, error) {
 
 // ListGroups returns the addresses of the groups the account belongs to, sorted.
 func (s *Store) ListGroups(name string) ([]string, error) {
+	name = auth.CanonicalName(name)
+
 	accounts, err := s.listAccounts()
 	if err != nil {
 		return nil, err
@@ -383,6 +412,9 @@ func (s *Store) ListGroups(name string) ([]string, error) {
 // AddGroup adds the account to an existing group; already being a member is a
 // no-op.
 func (s *Store) AddGroup(name, memberOf string) error {
+	name = auth.CanonicalName(name)
+	memberOf = auth.CanonicalName(memberOf)
+
 	accounts, err := s.listAccounts()
 	if err != nil {
 		return err
@@ -407,6 +439,9 @@ func (s *Store) AddGroup(name, memberOf string) error {
 }
 
 func (s *Store) RemoveGroup(name, memberOf string) error {
+	name = auth.CanonicalName(name)
+	memberOf = auth.CanonicalName(memberOf)
+
 	accounts, err := s.listAccounts()
 	if err != nil {
 		return err

@@ -8,6 +8,12 @@ import (
 
 const adminDomainsKey contextKey = "adminDomains"
 
+// CanonicalName is the form account names and addresses are stored and
+// compared in: trimmed and lower-cased.
+func CanonicalName(name string) string {
+	return strings.ToLower(strings.TrimSpace(name))
+}
+
 // DomainOf returns the lowercased domain of an account name or address, or ""
 // when it has none.
 func DomainOf(name string) string {

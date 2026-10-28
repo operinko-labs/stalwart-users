@@ -118,7 +118,7 @@ func newDeleteGroupHandler(store groupsStore) http.HandlerFunc {
 func groupAccountExists(w http.ResponseWriter, r *http.Request, store groupsStore) bool {
 	account, err := store.GetAccount(r.PathValue("name"))
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeStoreError(w, err)
 		return false
 	}
 	if account == nil {

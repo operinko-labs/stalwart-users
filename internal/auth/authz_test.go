@@ -50,6 +50,7 @@ func TestAuthorizationMiddlewareAllowsOwnAccountSelfServiceRoutes(t *testing.T) 
 		{name: "get own emails", method: http.MethodGet, pattern: "GET /accounts/{name}/emails", path: "/accounts/alice@example.com/emails"},
 		{name: "get own groups", method: http.MethodGet, pattern: "GET /accounts/{name}/groups", path: "/accounts/alice@example.com/groups"},
 		{name: "change own password", method: http.MethodPut, pattern: "PUT /accounts/{name}/password", path: "/accounts/alice@example.com/password"},
+		{name: "mixed-case own account", method: http.MethodGet, pattern: "GET /accounts/{name}", path: "/accounts/Alice@Example.com"},
 	}
 
 	for _, tt := range tests {

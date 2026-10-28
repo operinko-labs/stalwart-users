@@ -29,6 +29,23 @@ func (emptyStalwart) Authenticate(context.Context, string, string) (bool, error)
 }
 func (emptyStalwart) SetPassword(context.Context, stalwart.Account, string) error { return nil }
 
+// accountsStalwart is a Stalwart holding a fixed set of accounts.
+type accountsStalwart struct {
+	emptyStalwart
+	accounts []stalwart.Account
+}
+
+func (f accountsStalwart) ListAccounts(context.Context) ([]stalwart.Account, error) {
+	return f.accounts, nil
+}
+
+// exactAdminDomains matches names exactly, like the Postgres table.
+type exactAdminDomains map[string][]string
+
+func (f exactAdminDomains) ListAdminDomains(name string) ([]string, error) { return f[name], nil }
+func (f exactAdminDomains) SetAdminDomains(string, []string) error         { return nil }
+func (f exactAdminDomains) DeleteAdminDomains(string) error                { return nil }
+
 type noAdminDomains struct{}
 
 func (noAdminDomains) ListAdminDomains(string) ([]string, error) { return nil, nil }
@@ -190,5 +207,58 @@ func TestCORSMiddlewareHandlesPreflight(t *testing.T) {
 	}
 	if got := rr.Header().Get("Access-Control-Allow-Methods"); got != "GET, POST, PUT, PATCH, DELETE, OPTIONS" {
 		t.Fatalf("Access-Control-Allow-Methods = %q, want configured methods", got)
+	}
+}
+
+func TestDomainAdminCannotUseMixedCaseNamesToBypassChecks(t *testing.T) {
+	t.Parallel()
+
+	store := directory.New(accountsStalwart{accounts: []stalwart.Account{
+		{ID: "d", Type: "User", Email: "dora@client.fi"},
+		{ID: "p", Type: "User", Email: "pete@client.fi"},
+	}}, exactAdminDomains{
+		"dora@client.fi": {"client.fi"},
+		"pete@client.fi": {"client.fi", "other.fi"},
+	})
+	handler, err := newServerHandler(serverConfig{JWTSecret: serverTestJWTSecret}, nil, store)
+	if err != nil {
+		t.Fatalf("newServerHandler() error = %v", err)
+	}
+	tokens, err := auth.NewTokenManager(serverTestJWTSecret)
+	if err != nil {
+		t.Fatalf("NewTokenManager() error = %v", err)
+	}
+	token, err := tokens.GenerateToken("dora@client.fi", false)
+	if err != nil {
+		t.Fatalf("GenerateToken() error = %v", err)
+	}
+
+	tests := []struct {
+		name   string
+		method string
+		path   string
+		body   string
+		want   int
+		error  string
+	}{
+		{name: "reset peer password", method: http.MethodPut, path: "/api/accounts/Pete@client.fi/password", body: `{"new_password":"new-Password-1"}`, want: http.StatusForbidden, error: "forbidden"},
+		{name: "delete peer", method: http.MethodDelete, path: "/api/accounts/Pete@Client.fi", want: http.StatusForbidden, error: "forbidden"},
+		{name: "own password without current", method: http.MethodPut, path: "/api/accounts/Dora@client.fi/password", body: `{"new_password":"new-Password-1"}`, want: http.StatusBadRequest, error: "current_password is required"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			req := httptest.NewRequest(tt.method, tt.path, strings.NewReader(tt.body))
+			req.AddCookie(&http.Cookie{Name: "token", Value: token})
+			rr := httptest.NewRecorder()
+
+			handler.ServeHTTP(rr, req)
+
+			if rr.Code != tt.want || !strings.Contains(rr.Body.String(), tt.error) {
+				t.Fatalf("status = %d body = %s; want %d with %q", rr.Code, rr.Body.String(), tt.want, tt.error)
+			}
+		})
 	}
 }

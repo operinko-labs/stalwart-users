@@ -82,7 +82,7 @@ func isAuthorizedRequest(r *http.Request, username string, store AccessStore) (b
 	switch {
 	case r.Pattern == "GET /accounts" || r.Pattern == "POST /accounts":
 		return len(AdminDomainsFromContext(r.Context())) > 0, nil
-	case slices.Contains(selfServiceRoutes, r.Pattern) && r.PathValue("name") == username:
+	case slices.Contains(selfServiceRoutes, r.Pattern) && CanonicalName(r.PathValue("name")) == CanonicalName(username):
 		return true, nil
 	case slices.Contains(domainAdminRoutes, r.Pattern):
 		return canManageAccount(r, store)

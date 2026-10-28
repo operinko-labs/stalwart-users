@@ -15,7 +15,7 @@ This project provides a management interface for Stalwart 1.0's internal directo
   - **Full admins** (accounts with Stalwart's Admin role) can do everything.
   - **Domain admins** manage the accounts on the domains assigned to them in `directory.domain_admins` (created by the app on startup; full admins edit it via `/accounts/{name}/admin-domains`). They can create, edit, delete and reset passwords for those accounts, and manage their addresses and groups on those domains. They cannot set quotas, touch full admins, grant any admin rights, or act on a peer domain admin who manages a domain they don't.
   - **Everyone else** can view their own account, edit its full name and change their own password; their addresses are read-only.
-- **Frontend**: Vanilla HTML/JS/CSS SPA. In production, it is served by Stalwart's Applications feature.
+- **Frontend**: React SPA. In production, it is served by Stalwart's Applications feature.
 - **Ingress**: API requests are typically proxied via a Gateway API HTTPRoute.
 
 ## API endpoints

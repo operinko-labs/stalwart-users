@@ -590,3 +590,42 @@ func TestSetPasswordUnknown(t *testing.T) {
 		t.Fatal("client.SetPassword called")
 	}
 }
+
+func TestMixedCaseNamesUseCanonicalName(t *testing.T) {
+	t.Parallel()
+
+	store, client, admins := newStore()
+	admins.domains = map[string][]string{"dora@client.fi": {"client.fi", "other.fi"}}
+
+	domains, err := store.ListAdminDomains(" Dora@CLIENT.fi")
+	if err != nil || !reflect.DeepEqual(domains, []string{"client.fi", "other.fi"}) {
+		t.Fatalf("ListAdminDomains() = %v, %v; want the canonical account's domains", domains, err)
+	}
+	if isAdmin, err := store.IsAdmin("Root@VaderRP.com"); err != nil || !isAdmin {
+		t.Fatalf("IsAdmin() = %v, %v; want true", isAdmin, err)
+	}
+	if err := store.SetAdminDomains("Dora@Client.fi", []string{"client.fi"}); err != nil {
+		t.Fatalf("SetAdminDomains() error = %v", err)
+	}
+	if _, ok := admins.set["dora@client.fi"]; !ok || len(admins.set) != 1 {
+		t.Fatalf("SetAdminDomains wrote %v, want key dora@client.fi", admins.set)
+	}
+	if _, err := store.Authenticate(context.Background(), " Dora@Client.FI ", "pw"); err != nil {
+		t.Fatalf("Authenticate() error = %v", err)
+	}
+	if client.authSeen[0] != "dora@client.fi" {
+		t.Fatalf("Authenticate sent %q, want dora@client.fi", client.authSeen[0])
+	}
+}
+
+func TestDeleteAccountMixedCaseRemovesCanonicalAdminDomains(t *testing.T) {
+	t.Parallel()
+
+	store, _, admins := newStore()
+	if err := store.DeleteAccount("Dora@CLIENT.fi"); err != nil {
+		t.Fatalf("DeleteAccount() error = %v", err)
+	}
+	if !reflect.DeepEqual(admins.deleted, []string{"dora@client.fi"}) {
+		t.Fatalf("admins.deleted = %v, want [dora@client.fi]", admins.deleted)
+	}
+}

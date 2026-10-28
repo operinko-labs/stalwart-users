@@ -68,7 +68,6 @@ func TestStalwartAuthenticatorSuccess(t *testing.T) {
 		t.Fatalf("checker saw %v, want normalised username", checker.seen)
 	}
 
-	checker.ok = true
 	user, err = authenticator.Authenticate(context.Background(), "bob@client.fi", "secret")
 	if err != nil || user == nil || user.IsAdmin {
 		t.Fatalf("user = %#v, err = %v; want non-admin bob", user, err)

@@ -78,12 +78,12 @@ func newCreateEmailHandler(store aliasesStore) http.HandlerFunc {
 				writeError(w, http.StatusForbidden, "you can only add addresses on domains you manage")
 				return
 			}
-			if emailType != "alias" && emailType != "list" {
-				writeError(w, http.StatusForbidden, "you can only add alias or list addresses")
+			if emailType != "alias" {
+				writeError(w, http.StatusForbidden, "you can only add alias addresses")
 				return
 			}
-			// A shared address delivers to every account holding it, so only
-			// full admins may reuse one.
+			// No one may add an address that is already on an account; the
+			// store enforces that for full admins too.
 			inUse, err := store.AddressInUse(req.Address)
 			if err != nil {
 				writeError(w, http.StatusInternalServerError, err.Error())

@@ -3,6 +3,7 @@ package api
 import (
 	"encoding/json"
 	"errors"
+	"log"
 	"net/http"
 
 	"github.com/operinko-labs/stalwart-users/internal/auth"
@@ -200,13 +201,16 @@ func writeStoreError(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusNotFound, "account not found")
 	case errors.Is(err, errGroupMembershipNotFound):
 		writeError(w, http.StatusNotFound, "group membership not found")
-	case errors.Is(err, directory.ErrAddressInUse):
+	case errors.Is(err, directory.ErrAddressInUse), errors.Is(err, stalwart.ErrAlreadyExists):
 		writeError(w, http.StatusConflict, "address already in use")
 	case errors.Is(err, directory.ErrUnsupported):
 		writeError(w, http.StatusBadRequest, err.Error())
 	case errors.As(err, &invalid):
 		writeError(w, http.StatusBadRequest, invalid.Description)
 	default:
-		writeError(w, http.StatusInternalServerError, err.Error())
+		// The detail may hold Stalwart's raw response body, so it goes to the
+		// log only. Store errors carry names and IDs, never secrets.
+		log.Printf("store error: %v", err)
+		writeError(w, http.StatusInternalServerError, "internal error")
 	}
 }

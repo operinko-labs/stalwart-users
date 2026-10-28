@@ -70,9 +70,10 @@ func (f *fakeClient) DeleteAccount(_ context.Context, name string) error {
 }
 
 type fakeAdmins struct {
-	domains map[string][]string
-	set     map[string][]string
-	deleted []string
+	domains   map[string][]string
+	set       map[string][]string
+	deleted   []string
+	deleteErr error
 }
 
 func (f *fakeAdmins) ListAdminDomains(name string) ([]string, error) { return f.domains[name], nil }
@@ -84,6 +85,9 @@ func (f *fakeAdmins) SetAdminDomains(name string, domains []string) error {
 	return nil
 }
 func (f *fakeAdmins) DeleteAdminDomains(name string) error {
+	if f.deleteErr != nil {
+		return f.deleteErr
+	}
 	f.deleted = append(f.deleted, name)
 	return nil
 }
@@ -182,14 +186,15 @@ func TestUpdateAccountQuotaPatch(t *testing.T) {
 	if err := store.UpdateAccount("dora@client.fi", nil, &zero, nil); err != nil {
 		t.Fatalf("UpdateAccount() error = %v", err)
 	}
-	if client.updatedID != "a1" || !reflect.DeepEqual(client.patch, map[string]any{"quotas": map[string]any{}}) {
+	if client.updatedID != "a1" || !reflect.DeepEqual(client.patch, map[string]any{"quotas/maxDiskQuota": nil}) {
 		t.Fatalf("id = %q, patch = %#v", client.updatedID, client.patch)
 	}
 
 	if err := store.UpdateAccount("dora@client.fi", &desc, &size, nil); err != nil {
 		t.Fatalf("UpdateAccount() error = %v", err)
 	}
-	want := map[string]any{"description": "Changed", "quotas": map[string]any{"maxDiskQuota": int64(4096)}}
+	// Only maxDiskQuota is patched, so any other quota Stalwart holds stays.
+	want := map[string]any{"description": "Changed", "quotas/maxDiskQuota": int64(4096)}
 	if !reflect.DeepEqual(client.patch, want) {
 		t.Fatalf("patch = %#v, want %#v", client.patch, want)
 	}
@@ -244,6 +249,21 @@ func TestDeleteAccountRemovesAdminDomains(t *testing.T) {
 	}
 	if !reflect.DeepEqual(client.deleted, []string{"Dora@client.fi"}) || !reflect.DeepEqual(admins.deleted, []string{"dora@client.fi"}) {
 		t.Fatalf("client.deleted = %v, admins.deleted = %v", client.deleted, admins.deleted)
+	}
+}
+
+// The admin rows go first: if removing them fails, the Stalwart account is
+// kept, so no orphaned rows remain for a re-created address to inherit.
+func TestDeleteAccountRemovesAdminDomainsBeforeTheAccount(t *testing.T) {
+	t.Parallel()
+
+	store, client, admins := newStore()
+	admins.deleteErr = errors.New("db down")
+	if err := store.DeleteAccount("dora@client.fi"); err == nil {
+		t.Fatal("DeleteAccount() error = nil, want the admin rows error")
+	}
+	if len(client.deleted) != 0 {
+		t.Fatalf("Stalwart account deleted (%v) although its admin rows were not", client.deleted)
 	}
 }
 
@@ -654,5 +674,20 @@ func TestFoldingVariantsDoNotMatch(t *testing.T) {
 	}
 	if err := store.DeleteEmail("dora@client.fi", "ſales@client.fi"); err != nil || client.updateCalls != 0 {
 		t.Fatalf("DeleteEmail() err = %v, updates = %d; want no-op", err, client.updateCalls)
+	}
+}
+
+func TestCreateAccountRejectsNameWithoutAddressParts(t *testing.T) {
+	t.Parallel()
+
+	for _, name := range []string{"dora", "@client.fi", "dora@", ""} {
+		store, client, _ := newStore()
+		err := store.CreateAccount(name, "pw", "", "individual", 0)
+		if !errors.Is(err, ErrUnsupported) {
+			t.Fatalf("CreateAccount(%q) err = %v, want ErrUnsupported", name, err)
+		}
+		if client.createCalls != 0 {
+			t.Fatalf("CreateAccount(%q) reached the client", name)
+		}
 	}
 }

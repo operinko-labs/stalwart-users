@@ -8,6 +8,8 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/operinko-labs/stalwart-users/internal/model"
 )
 
 const loginTestJWTSecret = testJWTSecret
@@ -41,6 +43,16 @@ func (f *fakeChecker) Authenticate(_ context.Context, username, password string)
 type fakeAccess struct {
 	admins map[string]bool
 	asked  []string
+	// users holds the primary address of each User account; nil means
+	// every name is a user.
+	users map[string]*model.Account
+}
+
+func (f *fakeAccess) GetAccount(name string) (*model.Account, error) {
+	if f.users == nil {
+		return &model.Account{Name: name}, nil
+	}
+	return f.users[name], nil
 }
 
 func (f *fakeAccess) IsAdmin(name string) (bool, error) {
@@ -86,6 +98,60 @@ func TestStalwartAuthenticatorInvalid(t *testing.T) {
 	}
 	if len(access.asked) != 0 {
 		t.Fatalf("IsAdmin asked for %v after failed login", access.asked)
+	}
+}
+
+func TestStalwartAuthenticatorResolvesPrimaryAddress(t *testing.T) {
+	t.Parallel()
+
+	access := &fakeAccess{users: map[string]*model.Account{"dora@client.fi": {Name: "Dora@client.fi"}}}
+	authenticator := NewStalwartAuthenticator(&fakeChecker{ok: true}, access)
+
+	user, err := authenticator.Authenticate(context.Background(), " DORA@client.fi", "secret")
+	if err != nil || user == nil || user.Username != "dora@client.fi" {
+		t.Fatalf("Authenticate() = %#v, %v; want dora@client.fi", user, err)
+	}
+}
+
+// Stalwart accepts aliases and bare principal names as login names, but the
+// session must name a User account's primary address.
+func TestStalwartAuthenticatorRejectsNamesThatAreNotAPrimaryAddress(t *testing.T) {
+	t.Parallel()
+
+	for _, name := range []string{"sales@client.fi", "dora"} {
+		access := &fakeAccess{users: map[string]*model.Account{"dora@client.fi": {Name: "dora@client.fi"}}}
+		authenticator := NewStalwartAuthenticator(&fakeChecker{ok: true}, access)
+
+		user, err := authenticator.Authenticate(context.Background(), name, "secret")
+		if err != nil || user != nil {
+			t.Fatalf("Authenticate(%q) = %#v, %v; want nil, nil (invalid credentials)", name, user, err)
+		}
+		if len(access.asked) != 0 {
+			t.Fatalf("IsAdmin asked for %v for an unknown login name", access.asked)
+		}
+	}
+}
+
+func TestLoginHandlerAliasLoginIsInvalidCredentials(t *testing.T) {
+	t.Parallel()
+
+	tokens, err := NewTokenManager(loginTestJWTSecret)
+	if err != nil {
+		t.Fatalf("NewTokenManager() error = %v", err)
+	}
+
+	access := &fakeAccess{users: map[string]*model.Account{"dora@client.fi": {Name: "dora@client.fi"}}}
+	handler := LoginHandler(NewStalwartAuthenticator(&fakeChecker{ok: true}, access), tokens)
+	req := httptest.NewRequest(http.MethodPost, "/api/auth/login", strings.NewReader(`{"email":"sales@client.fi","password":"secret"}`))
+	rr := httptest.NewRecorder()
+
+	handler.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusUnauthorized || !strings.Contains(rr.Body.String(), `"invalid credentials"`) {
+		t.Fatalf("status = %d body = %s, want 401 invalid credentials", rr.Code, rr.Body.String())
+	}
+	if len(rr.Result().Cookies()) != 0 {
+		t.Fatal("session cookie set for an alias login")
 	}
 }
 

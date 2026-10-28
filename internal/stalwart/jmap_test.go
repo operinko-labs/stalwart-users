@@ -4,9 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
+	"sync/atomic"
 	"testing"
 )
 
@@ -578,5 +581,141 @@ func TestUpdateAccountOtherFailureIsNotErrInvalid(t *testing.T) {
 	var invalid ErrInvalid
 	if errors.As(err, &invalid) {
 		t.Fatalf("error = %v, want not ErrInvalid", err)
+	}
+}
+
+func TestSetPasswordCreatesCredentialAtFirstUnusedKey(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assertJMAPRequest(t, r)
+		request := decodeTestJMAPRequest(t, r)
+		_, args := decodeTestMethodCall(t, request.MethodCalls[0])
+		patch := args["update"].(map[string]any)["cv"].(map[string]any)
+		credential, ok := patch["credentials/10"].(map[string]any)
+		if len(patch) != 1 || !ok || credential["@type"] != "Password" || credential["secret"] != "newpw" {
+			t.Fatalf("patch = %#v, want only a credentials/10 Password credential", patch)
+		}
+		_, _ = w.Write([]byte(`{"methodResponses":[["x:Account/set",{"accountId":"d333333","updated":{"cv":null}},"c1"]]}`))
+	}))
+	defer server.Close()
+
+	client := NewClient(server.URL, "test-token")
+	client.httpClient = server.Client()
+
+	// An ApiKey at 0 and a non-numeric key must not be overwritten; the largest
+	// numeric key is 9, so the new credential goes to 10.
+	account := Account{ID: "cv", CredentialKeys: []string{"0", "9", "x"}}
+	if err := client.SetPassword(context.Background(), account, "newpw"); err != nil {
+		t.Fatalf("SetPassword() error = %v", err)
+	}
+}
+
+func TestSetPasswordDoesNotOverwriteApiKeyAtZero(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		request := decodeTestJMAPRequest(t, r)
+		_, args := decodeTestMethodCall(t, request.MethodCalls[0])
+		patch := args["update"].(map[string]any)["cv"].(map[string]any)
+		if _, ok := patch["credentials/1"].(map[string]any); len(patch) != 1 || !ok {
+			t.Fatalf("patch = %#v, want only credentials/1", patch)
+		}
+		_, _ = w.Write([]byte(`{"methodResponses":[["x:Account/set",{"accountId":"d333333","updated":{"cv":null}},"c1"]]}`))
+	}))
+	defer server.Close()
+
+	client := NewClient(server.URL, "test-token")
+	client.httpClient = server.Client()
+
+	account := Account{ID: "cv", CredentialKeys: []string{"0"}}
+	if err := client.SetPassword(context.Background(), account, "newpw"); err != nil {
+		t.Fatalf("SetPassword() error = %v", err)
+	}
+}
+
+func TestListAccountsCredentialKeysAndNumericPasswordKey(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"methodResponses":[["x:Account/get",{"accountId":"d333333","list":[
+			{"id":"u1","@type":"User","name":"bob","domainId":"h","emailAddress":"bob@erinko.fi","roles":{"@type":"User"},"quotas":{},"aliases":{},"memberGroupIds":{},
+			 "credentials":{"0":{"@type":"ApiKey"},"10":{"@type":"Password"},"9":{"@type":"Password"}}},
+			{"id":"u2","@type":"User","name":"amy","domainId":"h","emailAddress":"amy@erinko.fi","roles":{"@type":"User"},"quotas":{},"aliases":{},"memberGroupIds":{},
+			 "credentials":{"0":{"@type":"ApiKey"}}}
+		],"notFound":[]},"c1"]]}`))
+	}))
+	defer server.Close()
+
+	client := NewClient(server.URL, "test-token")
+	client.httpClient = server.Client()
+
+	accounts, err := client.ListAccounts(context.Background())
+	if err != nil {
+		t.Fatalf("ListAccounts() error = %v", err)
+	}
+	if accounts[0].PasswordKey != "9" {
+		t.Fatalf("PasswordKey = %q, want 9 (numeric order, not string order)", accounts[0].PasswordKey)
+	}
+	if !reflect.DeepEqual(accounts[0].CredentialKeys, []string{"0", "9", "10"}) {
+		t.Fatalf("CredentialKeys = %#v, want [0 9 10]", accounts[0].CredentialKeys)
+	}
+	if accounts[1].PasswordKey != "" || !reflect.DeepEqual(accounts[1].CredentialKeys, []string{"0"}) {
+		t.Fatalf("account = %#v, want no PasswordKey and CredentialKeys [0]", accounts[1])
+	}
+}
+
+func TestCreateAccountAlreadyExists(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		method, _ := decodeTestMethodCall(t, decodeTestJMAPRequest(t, r).MethodCalls[0])
+		if method == "x:Domain/query" {
+			_, _ = w.Write([]byte(`{"methodResponses":[["x:Domain/query",{"ids":["h"]},"c1"]]}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"methodResponses":[["x:Account/set",{"notCreated":{"new1":{"type":"alreadyExists","description":"An account with this name already exists"}}},"c1"]]}`))
+	}))
+	defer server.Close()
+
+	client := NewClient(server.URL, "test-token")
+	client.httpClient = server.Client()
+
+	err := client.CreateAccount(context.Background(), "bob@erinko.fi", "pw", "", 0)
+	if !errors.Is(err, ErrAlreadyExists) {
+		t.Fatalf("CreateAccount() error = %v, want ErrAlreadyExists", err)
+	}
+}
+
+// Authenticate drains the session response so the keep-alive connection is
+// reused; an undrained body makes the transport close it.
+func TestAuthenticateDrainsBodyForConnectionReuse(t *testing.T) {
+	t.Parallel()
+
+	var newConns atomic.Int32
+	server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if _, _, ok := r.BasicAuth(); !ok {
+			t.Error("request without basic auth")
+		}
+		_, _ = w.Write([]byte(`{"capabilities":{},"accounts":{},"username":"bob@erinko.fi"}`))
+	}))
+	server.Config.ConnState = func(_ net.Conn, state http.ConnState) {
+		if state == http.StateNew {
+			newConns.Add(1)
+		}
+	}
+	server.Start()
+	defer server.Close()
+
+	client := NewClient(server.URL, "test-token")
+	client.httpClient = server.Client()
+
+	for range 2 {
+		if ok, err := client.Authenticate(context.Background(), "bob@erinko.fi", "pw"); err != nil || !ok {
+			t.Fatalf("Authenticate() = %v, %v; want true", ok, err)
+		}
+	}
+	if n := newConns.Load(); n != 1 {
+		t.Fatalf("connections = %d, want 1 (body drained, connection reused)", n)
 	}
 }

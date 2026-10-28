@@ -86,6 +86,7 @@ The image also ships `/migrate-directory`, a one-shot tool that copies the old S
 /migrate-directory --apply --only a@x.com   # limit to these accounts (repeatable)
 ```
 
+- Run a full dry run (no `--only`) first. `--only` doesn't check duplicates against the accounts it excludes.
 - Password hashes are copied byte for byte. A secret that isn't a valid `{SSHA512}` hash stops the run before anything is written, naming the account.
 - The tool only adds. It sets the description when SQL has one, grants the Admin role when SQL says admin, sets the disk quota when SQL has one, and adds aliases Stalwart lacks. It never lowers a role or removes an alias.
 - `--apply` writes every secret again, because Stalwart doesn't return them. A line reading `unchanged` means no other field differs.

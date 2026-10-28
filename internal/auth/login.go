@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+
+	"github.com/operinko-labs/stalwart-users/internal/model"
 )
 
 type AuthenticatedUser struct {
@@ -19,11 +21,19 @@ type credentialChecker interface {
 	Authenticate(ctx context.Context, username, password string) (bool, error)
 }
 
+// LoginStore resolves login names to User accounts and holds their access.
+type LoginStore interface {
+	AccessStore
+	// GetAccount returns the User whose primary address is name (exact
+	// canonical match), or nil when there is none.
+	GetAccount(name string) (*model.Account, error)
+}
+
 // StalwartAuthenticator checks credentials against Stalwart and takes the
 // admin flag from the access store.
 type StalwartAuthenticator struct {
 	checker credentialChecker
-	admins  AccessStore
+	admins  LoginStore
 }
 
 type loginRequest struct {
@@ -31,7 +41,7 @@ type loginRequest struct {
 	Password string `json:"password"`
 }
 
-func NewStalwartAuthenticator(checker credentialChecker, admins AccessStore) *StalwartAuthenticator {
+func NewStalwartAuthenticator(checker credentialChecker, admins LoginStore) *StalwartAuthenticator {
 	return &StalwartAuthenticator{checker: checker, admins: admins}
 }
 
@@ -41,6 +51,16 @@ func (a *StalwartAuthenticator) Authenticate(ctx context.Context, username, pass
 	ok, err := a.checker.Authenticate(ctx, username, password)
 	if err != nil || !ok {
 		return nil, err
+	}
+
+	// Stalwart also accepts aliases and bare principal names. The session must
+	// name a User's primary address, so any other name is invalid credentials.
+	account, err := a.admins.GetAccount(username)
+	if err != nil {
+		return nil, err
+	}
+	if account == nil || CanonicalName(account.Name) != username {
+		return nil, nil
 	}
 
 	isAdmin, err := a.admins.IsAdmin(username)

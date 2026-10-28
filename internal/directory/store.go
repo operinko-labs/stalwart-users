@@ -91,6 +91,11 @@ func (s *Store) CreateAccount(name, password, description, accountType string, q
 		return fmt.Errorf("%w: groups can't be created", ErrUnsupported)
 	}
 
+	localPart, domain, ok := strings.Cut(name, "@")
+	if !ok || localPart == "" || domain == "" {
+		return fmt.Errorf("%w: invalid account name %q", ErrUnsupported, name)
+	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), callTimeout)
 	defer cancel()
 
@@ -117,11 +122,13 @@ func (s *Store) UpdateAccount(name string, description *string, quota *int, acti
 		patch["description"] = *description
 	}
 	if quota != nil {
-		quotas := map[string]any{}
+		// Patch only maxDiskQuota so other quotas Stalwart holds stay; null
+		// removes the key.
 		if *quota > 0 {
-			quotas["maxDiskQuota"] = int64(*quota)
+			patch["quotas/maxDiskQuota"] = int64(*quota)
+		} else {
+			patch["quotas/maxDiskQuota"] = nil
 		}
-		patch["quotas"] = quotas
 	}
 	if len(patch) == 0 {
 		return nil
@@ -144,14 +151,16 @@ func (s *Store) DeleteAccount(name string) error {
 		return db.ErrAccountNotFound
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), callTimeout)
-	defer cancel()
-
-	if err := s.client.DeleteAccount(ctx, account.Email); err != nil {
+	// Remove the admin rows first: if the Stalwart delete came first and this
+	// failed, a re-created address would inherit the orphaned rows.
+	if err := s.admins.DeleteAdminDomains(name); err != nil {
 		return err
 	}
 
-	return s.admins.DeleteAdminDomains(name)
+	ctx, cancel := context.WithTimeout(context.Background(), callTimeout)
+	defer cancel()
+
+	return s.client.DeleteAccount(ctx, account.Email)
 }
 
 // IsAdmin reports whether the account holds an admin role in Stalwart; unknown

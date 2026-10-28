@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -140,7 +141,7 @@ func TestCreateEmailHandlerMapsStoreErrors(t *testing.T) {
 		{name: "in use", err: directory.ErrAddressInUse, status: http.StatusConflict, message: "address already in use"},
 		{name: "unhosted domain", err: fmt.Errorf("%w: domain nowhere.fi is not hosted here", directory.ErrUnsupported), status: http.StatusBadRequest, message: "not supported by Stalwart 1.0: domain nowhere.fi is not hosted here"},
 		{name: "invalid", err: fmt.Errorf("update account: %w", stalwart.ErrInvalid{Description: "Invalid alias"}), status: http.StatusBadRequest, message: "Invalid alias"},
-		{name: "unexpected", err: errors.New("boom"), status: http.StatusInternalServerError, message: "boom"},
+		{name: "unexpected", err: errors.New("boom"), status: http.StatusInternalServerError, message: "internal error"},
 	}
 
 	for _, tt := range tests {
@@ -299,7 +300,7 @@ func TestCreateEmailHandlerRejectsAddressesOutsideManagedDomains(t *testing.T) {
 	}
 }
 
-func TestCreateEmailHandlerLimitsDomainAdminsToAliasAndListTypes(t *testing.T) {
+func TestCreateEmailHandlerLimitsDomainAdminsToAliases(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
@@ -308,7 +309,7 @@ func TestCreateEmailHandlerLimitsDomainAdminsToAliasAndListTypes(t *testing.T) {
 	}{
 		{emailType: "", want: http.StatusCreated},
 		{emailType: "alias", want: http.StatusCreated},
-		{emailType: "list", want: http.StatusCreated},
+		{emailType: "list", want: http.StatusForbidden},
 		{emailType: "primary", want: http.StatusForbidden},
 	}
 
@@ -324,7 +325,9 @@ func TestCreateEmailHandlerLimitsDomainAdminsToAliasAndListTypes(t *testing.T) {
 
 			newCreateEmailHandler(store).ServeHTTP(rr, req)
 
-			if rr.Code != tt.want {
+			if tt.want == http.StatusForbidden {
+				assertError(t, rr, tt.want, "you can only add alias addresses")
+			} else if rr.Code != tt.want {
 				t.Fatalf("status code = %d, want %d; body=%s", rr.Code, tt.want, rr.Body.String())
 			}
 		})
@@ -349,18 +352,67 @@ func TestCreateEmailHandlerRejectsAddressesInUseForDomainAdmins(t *testing.T) {
 	}
 }
 
-func TestCreateEmailHandlerLetsFullAdminsShareAddresses(t *testing.T) {
+// sharedAddressStalwart is a Stalwart where team@client.fi is already carol's
+// alias, for running the handlers against the real directory.Store.
+type sharedAddressStalwart struct{ updateCalls int }
+
+func (*sharedAddressStalwart) ListAccounts(context.Context) ([]stalwart.Account, error) {
+	return []stalwart.Account{
+		{ID: "b", Type: "User", Name: "bob", DomainID: "c", Email: "bob@client.fi", Aliases: map[string]stalwart.Alias{}},
+		{ID: "k", Type: "User", Name: "carol", DomainID: "c", Email: "carol@client.fi", Aliases: map[string]stalwart.Alias{"0": {Name: "team", DomainID: "c"}}},
+	}, nil
+}
+func (*sharedAddressStalwart) ListDomains(context.Context) ([]stalwart.Domain, error) {
+	return []stalwart.Domain{{ID: "c", Name: "client.fi"}}, nil
+}
+func (*sharedAddressStalwart) CreateAccount(context.Context, string, string, string, int64) error {
+	return nil
+}
+func (f *sharedAddressStalwart) UpdateAccount(context.Context, string, map[string]any) error {
+	f.updateCalls++
+	return nil
+}
+func (*sharedAddressStalwart) DeleteAccount(context.Context, string) error { return nil }
+func (*sharedAddressStalwart) Authenticate(context.Context, string, string) (bool, error) {
+	return false, nil
+}
+func (*sharedAddressStalwart) SetPassword(context.Context, stalwart.Account, string) error {
+	return nil
+}
+
+type noAdminDomains struct{}
+
+func (noAdminDomains) ListAdminDomains(string) ([]string, error) { return nil, nil }
+func (noAdminDomains) SetAdminDomains(string, []string) error    { return nil }
+func (noAdminDomains) DeleteAdminDomains(string) error           { return nil }
+
+// Full admins can't share addresses either: an address already on any account
+// is 409, and list addresses are not supported.
+func TestCreateEmailHandlerFullAdminsCannotShareAddressesOrAddLists(t *testing.T) {
 	t.Parallel()
 
-	store := &mockAliasesStore{getAccountResult: &model.Account{Name: "bob@client.fi"}, addressInUse: true}
-	req := asFullAdmin(httptest.NewRequest(http.MethodPost, "/accounts/bob@client.fi/emails", strings.NewReader(`{"address":"team@client.fi","type":"list"}`)))
-	req.SetPathValue("name", "bob@client.fi")
-	rr := httptest.NewRecorder()
+	tests := []struct {
+		body    string
+		status  int
+		message string
+	}{
+		{body: `{"address":"team@client.fi","type":"alias"}`, status: http.StatusConflict, message: "address already in use"},
+		{body: `{"address":"news@client.fi","type":"list"}`, status: http.StatusBadRequest, message: "not supported by Stalwart 1.0: only alias addresses can be added"},
+	}
 
-	newCreateEmailHandler(store).ServeHTTP(rr, req)
+	for _, tt := range tests {
+		client := &sharedAddressStalwart{}
+		store := directory.New(client, noAdminDomains{})
+		req := asFullAdmin(httptest.NewRequest(http.MethodPost, "/accounts/bob@client.fi/emails", strings.NewReader(tt.body)))
+		req.SetPathValue("name", "bob@client.fi")
+		rr := httptest.NewRecorder()
 
-	if rr.Code != http.StatusCreated {
-		t.Fatalf("status code = %d, want %d", rr.Code, http.StatusCreated)
+		newCreateEmailHandler(store).ServeHTTP(rr, req)
+
+		assertError(t, rr, tt.status, tt.message)
+		if client.updateCalls != 0 {
+			t.Fatalf("%s: Stalwart was updated", tt.body)
+		}
 	}
 }
 

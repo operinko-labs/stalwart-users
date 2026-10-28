@@ -1,11 +1,14 @@
 package api
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 
@@ -376,6 +379,19 @@ func TestCreateAccountGroupUnsupported(t *testing.T) {
 	assertError(t, rr, http.StatusBadRequest, "not supported by Stalwart 1.0: groups can't be created")
 }
 
+func TestCreateAccountAlreadyExistsInStalwartIsConflict(t *testing.T) {
+	t.Parallel()
+
+	store := &mockAccountsStore{createAccountErr: fmt.Errorf("create account bob@example.com: %w: Stalwart says so", stalwart.ErrAlreadyExists)}
+	body := strings.NewReader(`{"name":"bob@example.com","password":"secret"}`)
+	req := asFullAdmin(httptest.NewRequest(http.MethodPost, "/accounts", body))
+	rr := httptest.NewRecorder()
+
+	newCreateAccountHandler(store).ServeHTTP(rr, req)
+
+	assertError(t, rr, http.StatusConflict, "address already in use")
+}
+
 func TestCreateAccountHandlerReturnsServerErrorWhenStoreFails(t *testing.T) {
 	t.Parallel()
 
@@ -388,6 +404,29 @@ func TestCreateAccountHandlerReturnsServerErrorWhenStoreFails(t *testing.T) {
 
 	if rr.Code != http.StatusInternalServerError {
 		t.Fatalf("status code = %d, want %d", rr.Code, http.StatusInternalServerError)
+	}
+}
+
+// Not parallel: it swaps the global logger's output.
+func TestWriteStoreErrorHidesUnexpectedDetailButLogsIt(t *testing.T) {
+	var logged bytes.Buffer
+	log.SetOutput(&logged)
+	defer log.SetOutput(os.Stderr)
+
+	detail := `x:Account/set request failed with status 500: {"detail":"raw Stalwart body"}`
+	store := &mockAccountsStore{createAccountErr: fmt.Errorf("create account alice@example.com: %s", detail)}
+	body := strings.NewReader(`{"name":"alice@example.com","password":"secret"}`)
+	req := asFullAdmin(httptest.NewRequest(http.MethodPost, "/accounts", body))
+	rr := httptest.NewRecorder()
+
+	newCreateAccountHandler(store).ServeHTTP(rr, req)
+
+	assertError(t, rr, http.StatusInternalServerError, "internal error")
+	if strings.Contains(rr.Body.String(), "raw Stalwart body") {
+		t.Fatalf("body leaks the error detail: %s", rr.Body.String())
+	}
+	if !strings.Contains(logged.String(), detail) {
+		t.Fatalf("log = %q, want the error detail", logged.String())
 	}
 }
 

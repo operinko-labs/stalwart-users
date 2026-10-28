@@ -4,17 +4,23 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
 	"sort"
+	"strconv"
 	"strings"
 )
 
 const (
 	jmapCoreCapability     = "urn:ietf:params:jmap:core"
 	jmapStalwartCapability = "urn:stalwart:jmap"
+
+	// maxDrainBytes bounds how much of an unread response body is discarded
+	// before closing it.
+	maxDrainBytes = 64 << 10
 )
 
 type Client struct {
@@ -61,6 +67,10 @@ type ErrInvalid struct{ Description string }
 
 func (e ErrInvalid) Error() string { return e.Description }
 
+// ErrAlreadyExists marks a set error of type "alreadyExists": the object
+// (e.g. the account address) already exists in Stalwart.
+var ErrAlreadyExists = errors.New("already exists")
+
 type jmapCreatedObject struct {
 	ID string `json:"id"`
 }
@@ -73,7 +83,8 @@ type Account struct {
 	IsAdmin                                      bool             // roles["@type"] == "Admin"
 	DiskQuota                                    int64            // quotas["maxDiskQuota"], 0 if absent
 	MemberGroupIDs                               []string
-	PasswordKey                                  string // list key of the Password credential, "" if none
+	PasswordKey                                  string   // list key of the Password credential, "" if none
+	CredentialKeys                               []string // every credential list key, numeric keys in numeric order
 }
 
 type Domain struct{ ID, Name string }
@@ -186,12 +197,15 @@ func (c *Client) UpdateAccount(ctx context.Context, id string, patch map[string]
 	return nil
 }
 
-// SetPassword replaces the account's Password credential, or adds one at key 0
-// when the account has none.
+// SetPassword replaces the account's Password credential, or, when the account
+// has none, adds one under the first unused numeric key (largest numeric
+// credential key + 1, "0" if there is none) so no other credential is touched.
 func (c *Client) SetPassword(ctx context.Context, account Account, secret string) error {
-	patch := map[string]any{"credentials/0": passwordCredential(secret)}
+	var patch map[string]any
 	if account.PasswordKey != "" {
 		patch = map[string]any{"credentials/" + account.PasswordKey + "/secret": secret}
+	} else {
+		patch = map[string]any{"credentials/" + nextListKey(account.CredentialKeys): passwordCredential(secret)}
 	}
 
 	return c.UpdateAccount(ctx, account.ID, patch)
@@ -264,10 +278,14 @@ func (c *Client) ListAccounts(ctx context.Context) ([]Account, error) {
 		}
 		sort.Strings(account.MemberGroupIDs)
 		for key, credential := range object.Credentials {
-			if credential.Type == "Password" && (account.PasswordKey == "" || key < account.PasswordKey) {
+			account.CredentialKeys = append(account.CredentialKeys, key)
+			if credential.Type == "Password" && (account.PasswordKey == "" || listKeyLess(key, account.PasswordKey)) {
 				account.PasswordKey = key
 			}
 		}
+		sort.Slice(account.CredentialKeys, func(i, j int) bool {
+			return listKeyLess(account.CredentialKeys[i], account.CredentialKeys[j])
+		})
 		accounts = append(accounts, account)
 	}
 
@@ -299,7 +317,11 @@ func (c *Client) Authenticate(ctx context.Context, username, password string) (b
 	if err != nil {
 		return false, fmt.Errorf("send authenticate request: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		// Drain (bounded) so the keep-alive connection can be reused.
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, maxDrainBytes))
+		resp.Body.Close()
+	}()
 
 	switch resp.StatusCode {
 	case http.StatusOK:
@@ -415,6 +437,36 @@ func (c *Client) call(ctx context.Context, method string, arguments any, target 
 	return nil
 }
 
+// listKeyLess orders JMAP list keys numerically; non-numeric keys sort after
+// numeric ones, in string order.
+func listKeyLess(a, b string) bool {
+	na, errA := strconv.Atoi(a)
+	nb, errB := strconv.Atoi(b)
+	switch {
+	case errA == nil && errB == nil:
+		return na < nb
+	case errA == nil:
+		return true
+	case errB == nil:
+		return false
+	default:
+		return a < b
+	}
+}
+
+// nextListKey returns the first unused numeric list key: the largest numeric
+// key + 1, or "0" when there is none.
+func nextListKey(keys []string) string {
+	next := 0
+	for _, key := range keys {
+		if n, err := strconv.Atoi(key); err == nil && n >= next {
+			next = n + 1
+		}
+	}
+
+	return strconv.Itoa(next)
+}
+
 func splitAddress(name string) (string, string, error) {
 	localPart, domain, ok := strings.Cut(name, "@")
 	if !ok || localPart == "" || domain == "" {
@@ -428,6 +480,9 @@ func firstJMAPError(errs map[string]jmapError) error {
 	for _, err := range errs {
 		if err.Type == "invalidProperties" || err.Type == "invalidPatch" {
 			return ErrInvalid{Description: err.Description}
+		}
+		if err.Type == "alreadyExists" {
+			return ErrAlreadyExists
 		}
 		if err.Description != "" {
 			return fmt.Errorf("jmap error %s: %s", err.Type, err.Description)

@@ -1,17 +1,18 @@
 # stalwart-users
 
-Go API backend + vanilla SPA for managing Stalwart mail server's SQL directory (accounts, email aliases, group memberships), deployed as a Kubernetes sidecar container.
+Go API backend + SPA for managing accounts in Stalwart mail server's internal directory (accounts, email aliases, group memberships), deployed as a Kubernetes sidecar container.
 
 ## Overview
 
-This project provides a management interface for Stalwart mail server's SQL directory. It allows administrators to manage user accounts, email aliases, and group memberships directly in the underlying PostgreSQL database. The application consists of a Go backend API and a vanilla JavaScript SPA.
+This project provides a management interface for Stalwart 1.0's internal directory. It manages user accounts, email aliases and group memberships through Stalwart's JMAP admin API; Stalwart stores the accounts and hashes the passwords. The app's own PostgreSQL database only holds the domain admin assignments. The application consists of a Go backend API and an SPA.
 
 ## Architecture
 
 - **Backend**: Go service listening on port 3000.
-- **Authentication**: Validates JMAP sessions against the Stalwart server's `/jmap/session` endpoint.
+- **Authentication**: Checks the login email and password against Stalwart's `/jmap/session` endpoint with HTTP Basic auth, then issues the app's own JWT session cookie. Accounts with two-factor auth can't sign in this way.
+- **Account management**: Calls Stalwart's JMAP admin API (`x:Account`, `x:Domain`) with `STALWART_ADMIN_TOKEN`. New and changed passwords go to Stalwart as plaintext, so Stalwart's password policy applies and its rejections come back as 400. Stalwart 1.0 accounts can't be disabled, and groups are created in Stalwart's admin UI, not here.
 - **Authorization**: Three roles.
-  - **Full admins** (`directory.accounts.is_admin`) can do everything.
+  - **Full admins** (accounts with Stalwart's Admin role) can do everything.
   - **Domain admins** manage the accounts on the domains assigned to them in `directory.domain_admins` (created by the app on startup; full admins edit it via `/accounts/{name}/admin-domains`). They can create, edit, delete and reset passwords for those accounts, and manage their addresses and groups on those domains. They cannot set quotas, touch full admins, grant any admin rights, or act on a peer domain admin who manages a domain they don't.
   - **Everyone else** can view their own account, edit its full name and change their own password; their addresses are read-only.
 - **Frontend**: Vanilla HTML/JS/CSS SPA. In production, it is served by Stalwart's Applications feature.
@@ -41,20 +42,21 @@ This project provides a management interface for Stalwart mail server's SQL dire
 
 | Name | Description | Default | Required |
 |---|---|---|---|
-| `DATABASE_URL` | PostgreSQL connection string | | Yes |
-| `STALWART_URL` | Stalwart server URL for JMAP session validation | `http://localhost:8080` | No |
-| `ADMIN_USERS` | Comma-separated list of admin usernames | | No |
+| `STALWART_URL` | Stalwart server URL, for login checks and the JMAP admin API | | Yes |
+| `STALWART_ADMIN_TOKEN` | Bearer token for Stalwart's JMAP admin API | | Yes |
+| `DATABASE_URL` | PostgreSQL connection string for the `directory.domain_admins` table only | | Yes |
+| `JWT_SECRET` | Secret that signs session cookies | | Yes |
+| `CORS_ORIGIN` | Allowed CORS origin | `*` | No |
 | `PATH_PREFIX` | Path prefix for production routing (e.g., `/manage/api`) | | No |
 | `PORT` | Port the server listens on | `3000` | No |
-| `SERVE_UI` | Local path to UI files to serve (development only) | | No |
-| `AUTH_BYPASS` | Set to `true` to bypass authentication (development only) | `false` | No |
 
 ## Development
 
 ### Prerequisites
 
 - Go 1.24+
-- PostgreSQL database with the Stalwart `directory` schema
+- A Stalwart 1.0 server and an admin API token
+- PostgreSQL database with a `directory` schema (the app creates `directory.domain_admins` on startup)
 
 ### Build
 

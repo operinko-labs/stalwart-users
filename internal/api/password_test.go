@@ -1,52 +1,50 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 
 	"github.com/operinko-labs/stalwart-users/internal/auth"
+	"github.com/operinko-labs/stalwart-users/internal/stalwart"
 )
 
 const passwordTestJWTSecret = "0123456789abcdef0123456789abcdef"
 
 type mockPasswordsStore struct {
-	getAccountSecretResult string
-	getAccountSecretErr    error
-	updateAccountErr       error
+	authOK  bool
+	authErr error
+	setErr  error
 
-	getAccountSecretName string
-	updatedName          string
-	updatedSecret        string
-	getSecretCalls       int
-	updateCalls          int
+	authSeen    [2]string
+	authCalls   int
+	updatedName string
+	updatedPass string
+	updateCalls int
 }
 
-func (m *mockPasswordsStore) GetAccountSecret(name string) (string, error) {
-	m.getSecretCalls++
-	m.getAccountSecretName = name
-	return m.getAccountSecretResult, m.getAccountSecretErr
+func (m *mockPasswordsStore) Authenticate(_ context.Context, name, password string) (bool, error) {
+	m.authCalls++
+	m.authSeen = [2]string{name, password}
+	return m.authOK, m.authErr
 }
 
-func (m *mockPasswordsStore) UpdateAccountPassword(name, secret string) error {
+func (m *mockPasswordsStore) SetPassword(name, password string) error {
 	m.updateCalls++
 	m.updatedName = name
-	m.updatedSecret = secret
-	return m.updateAccountErr
+	m.updatedPass = password
+	return m.setErr
 }
 
 func TestChangePasswordHandlerUpdatesOwnPasswordWithValidCurrentPassword(t *testing.T) {
 	t.Parallel()
 
-	currentSecret, err := auth.HashSSHA512("old-password")
-	if err != nil {
-		t.Fatalf("HashSSHA512() error = %v", err)
-	}
-
-	store := &mockPasswordsStore{getAccountSecretResult: currentSecret}
+	store := &mockPasswordsStore{authOK: true}
 	rr := httptest.NewRecorder()
 
 	serveChangePasswordRequest(t, store, rr, "alice", false, "/accounts/alice/password", `{"current_password":"old-password","new_password":"new-password"}`)
@@ -54,14 +52,11 @@ func TestChangePasswordHandlerUpdatesOwnPasswordWithValidCurrentPassword(t *test
 	if rr.Code != http.StatusOK {
 		t.Fatalf("status code = %d, want %d; body=%s", rr.Code, http.StatusOK, rr.Body.String())
 	}
-	if store.getSecretCalls != 1 || store.getAccountSecretName != "alice" {
-		t.Fatalf("GetAccountSecret calls=%d name=%q, want 1/alice", store.getSecretCalls, store.getAccountSecretName)
+	if store.authCalls != 1 || store.authSeen != [2]string{"alice", "old-password"} {
+		t.Fatalf("Authenticate calls=%d seen=%v, want 1/alice old-password", store.authCalls, store.authSeen)
 	}
-	if store.updateCalls != 1 || store.updatedName != "alice" {
-		t.Fatalf("UpdateAccountPassword calls=%d name=%q, want 1/alice", store.updateCalls, store.updatedName)
-	}
-	if !auth.VerifyPassword("new-password", store.updatedSecret) {
-		t.Fatal("updated secret does not verify new password")
+	if store.updateCalls != 1 || store.updatedName != "alice" || store.updatedPass != "new-password" {
+		t.Fatalf("SetPassword calls=%d name=%q pass=%q, want 1/alice/new-password", store.updateCalls, store.updatedName, store.updatedPass)
 	}
 
 	var body map[string]string
@@ -73,15 +68,10 @@ func TestChangePasswordHandlerUpdatesOwnPasswordWithValidCurrentPassword(t *test
 	}
 }
 
-func TestChangePasswordHandlerRejectsInvalidCurrentPassword(t *testing.T) {
+func TestChangePasswordSelfChecksCurrent(t *testing.T) {
 	t.Parallel()
 
-	currentSecret, err := auth.HashSSHA512("old-password")
-	if err != nil {
-		t.Fatalf("HashSSHA512() error = %v", err)
-	}
-
-	store := &mockPasswordsStore{getAccountSecretResult: currentSecret}
+	store := &mockPasswordsStore{authOK: false}
 	rr := httptest.NewRecorder()
 
 	serveChangePasswordRequest(t, store, rr, "alice", false, "/accounts/alice/password", `{"current_password":"wrong-password","new_password":"new-password"}`)
@@ -90,7 +80,43 @@ func TestChangePasswordHandlerRejectsInvalidCurrentPassword(t *testing.T) {
 		t.Fatalf("status code = %d, want %d", rr.Code, http.StatusUnauthorized)
 	}
 	if store.updateCalls != 0 {
-		t.Fatalf("UpdateAccountPassword calls = %d, want 0", store.updateCalls)
+		t.Fatalf("SetPassword calls = %d, want 0", store.updateCalls)
+	}
+}
+
+func TestChangePasswordHandlerReturnsServerErrorWhenCheckFails(t *testing.T) {
+	t.Parallel()
+
+	store := &mockPasswordsStore{authErr: errors.New("stalwart down")}
+	rr := httptest.NewRecorder()
+
+	serveChangePasswordRequest(t, store, rr, "alice", false, "/accounts/alice/password", `{"current_password":"old-password","new_password":"new-password"}`)
+
+	if rr.Code != http.StatusInternalServerError {
+		t.Fatalf("status code = %d, want %d", rr.Code, http.StatusInternalServerError)
+	}
+	if store.updateCalls != 0 {
+		t.Fatalf("SetPassword calls = %d, want 0", store.updateCalls)
+	}
+}
+
+func TestChangePasswordWeakPassword(t *testing.T) {
+	t.Parallel()
+
+	store := &mockPasswordsStore{setErr: fmt.Errorf("update account: %w", stalwart.ErrInvalid{Description: "Password is too weak"})}
+	rr := httptest.NewRecorder()
+
+	serveChangePasswordRequest(t, store, rr, "admin", true, "/accounts/alice/password", `{"new_password":"weak"}`)
+
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("status code = %d, want %d; body=%s", rr.Code, http.StatusBadRequest, rr.Body.String())
+	}
+	var body map[string]string
+	if err := json.Unmarshal(rr.Body.Bytes(), &body); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+	if body["error"] != "Password is too weak" {
+		t.Fatalf("error = %q, want Stalwart's description", body["error"])
 	}
 }
 
@@ -105,14 +131,11 @@ func TestChangePasswordHandlerAllowsAdminResetWithoutCurrentPassword(t *testing.
 	if rr.Code != http.StatusOK {
 		t.Fatalf("status code = %d, want %d; body=%s", rr.Code, http.StatusOK, rr.Body.String())
 	}
-	if store.getSecretCalls != 0 {
-		t.Fatalf("GetAccountSecret calls = %d, want 0", store.getSecretCalls)
+	if store.authCalls != 0 {
+		t.Fatalf("Authenticate calls = %d, want 0", store.authCalls)
 	}
-	if store.updateCalls != 1 || store.updatedName != "alice" {
-		t.Fatalf("UpdateAccountPassword calls=%d name=%q, want 1/alice", store.updateCalls, store.updatedName)
-	}
-	if !auth.VerifyPassword("new-password", store.updatedSecret) {
-		t.Fatal("updated secret does not verify new password")
+	if store.updateCalls != 1 || store.updatedName != "alice" || store.updatedPass != "new-password" {
+		t.Fatalf("SetPassword calls=%d name=%q, want 1/alice", store.updateCalls, store.updatedName)
 	}
 }
 
@@ -127,8 +150,8 @@ func TestChangePasswordHandlerRejectsNonAdminChangingAnotherUser(t *testing.T) {
 	if rr.Code != http.StatusForbidden {
 		t.Fatalf("status code = %d, want %d", rr.Code, http.StatusForbidden)
 	}
-	if store.getSecretCalls != 0 || store.updateCalls != 0 {
-		t.Fatalf("store calls = get:%d update:%d, want 0/0", store.getSecretCalls, store.updateCalls)
+	if store.authCalls != 0 || store.updateCalls != 0 {
+		t.Fatalf("store calls = get:%d update:%d, want 0/0", store.authCalls, store.updateCalls)
 	}
 }
 
@@ -143,11 +166,11 @@ func TestChangePasswordHandlerLetsDomainAdminsResetWithoutCurrentPassword(t *tes
 	if rr.Code != http.StatusOK {
 		t.Fatalf("status code = %d, want %d; body=%s", rr.Code, http.StatusOK, rr.Body.String())
 	}
-	if store.getSecretCalls != 0 {
-		t.Fatalf("GetAccountSecret calls = %d, want 0", store.getSecretCalls)
+	if store.authCalls != 0 {
+		t.Fatalf("Authenticate calls = %d, want 0", store.authCalls)
 	}
 	if store.updateCalls != 1 || store.updatedName != "bob@client.fi" {
-		t.Fatalf("UpdateAccountPassword calls=%d name=%q, want 1/bob@client.fi", store.updateCalls, store.updatedName)
+		t.Fatalf("SetPassword calls=%d name=%q, want 1/bob@client.fi", store.updateCalls, store.updatedName)
 	}
 }
 
@@ -163,7 +186,7 @@ func TestChangePasswordHandlerRequiresCurrentPasswordForDomainAdminsOwnAccount(t
 		t.Fatalf("status code = %d, want %d", rr.Code, http.StatusBadRequest)
 	}
 	if store.updateCalls != 0 {
-		t.Fatalf("UpdateAccountPassword calls = %d, want 0", store.updateCalls)
+		t.Fatalf("SetPassword calls = %d, want 0", store.updateCalls)
 	}
 }
 
@@ -179,7 +202,7 @@ func TestChangePasswordHandlerRejectsDomainAdminsOutsideTheirDomains(t *testing.
 		t.Fatalf("status code = %d, want %d", rr.Code, http.StatusForbidden)
 	}
 	if store.updateCalls != 0 {
-		t.Fatalf("UpdateAccountPassword calls = %d, want 0", store.updateCalls)
+		t.Fatalf("SetPassword calls = %d, want 0", store.updateCalls)
 	}
 }
 
@@ -193,23 +216,20 @@ func serveDomainAdminPasswordRequest(store passwordsStore, rr *httptest.Response
 func TestChangePasswordHandlerReturnsNotFoundWhenAccountMissing(t *testing.T) {
 	t.Parallel()
 
-	store := &mockPasswordsStore{getAccountSecretErr: errAccountNotFound}
+	store := &mockPasswordsStore{setErr: errAccountNotFound}
 	rr := httptest.NewRecorder()
 
-	serveChangePasswordRequest(t, store, rr, "alice", false, "/accounts/alice/password", `{"current_password":"old-password","new_password":"new-password"}`)
+	serveChangePasswordRequest(t, store, rr, "admin", true, "/accounts/alice/password", `{"new_password":"new-password"}`)
 
 	if rr.Code != http.StatusNotFound {
 		t.Fatalf("status code = %d, want %d", rr.Code, http.StatusNotFound)
-	}
-	if store.updateCalls != 0 {
-		t.Fatalf("UpdateAccountPassword calls = %d, want 0", store.updateCalls)
 	}
 }
 
 func TestChangePasswordHandlerReturnsInternalServerErrorOnUpdateFailure(t *testing.T) {
 	t.Parallel()
 
-	store := &mockPasswordsStore{updateAccountErr: errors.New("boom")}
+	store := &mockPasswordsStore{setErr: errors.New("boom")}
 	rr := httptest.NewRecorder()
 
 	serveChangePasswordRequest(t, store, rr, "admin", true, "/accounts/alice/password", `{"new_password":"new-password"}`)

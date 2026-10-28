@@ -2,13 +2,16 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 
-	"github.com/lib/pq"
+	"github.com/operinko-labs/stalwart-users/internal/directory"
 	"github.com/operinko-labs/stalwart-users/internal/model"
+	"github.com/operinko-labs/stalwart-users/internal/stalwart"
 )
 
 type mockAliasesStore struct {
@@ -125,22 +128,53 @@ func TestCreateEmailHandlerCreatesAliasWithDefaultType(t *testing.T) {
 	}
 }
 
-func TestCreateEmailHandlerReturnsConflictOnDuplicate(t *testing.T) {
+func TestCreateEmailHandlerMapsStoreErrors(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		err     error
+		status  int
+		message string
+	}{
+		{name: "in use", err: directory.ErrAddressInUse, status: http.StatusConflict, message: "address already in use"},
+		{name: "unhosted domain", err: fmt.Errorf("%w: domain nowhere.fi is not hosted here", directory.ErrUnsupported), status: http.StatusBadRequest, message: "not supported by Stalwart 1.0: domain nowhere.fi is not hosted here"},
+		{name: "invalid", err: fmt.Errorf("update account: %w", stalwart.ErrInvalid{Description: "Invalid alias"}), status: http.StatusBadRequest, message: "Invalid alias"},
+		{name: "unexpected", err: errors.New("boom"), status: http.StatusInternalServerError, message: "boom"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			store := &mockAliasesStore{getAccountResult: &model.Account{Name: "alice"}, insertEmailErr: tt.err}
+			req := asFullAdmin(httptest.NewRequest(http.MethodPost, "/accounts/alice/emails", strings.NewReader(`{"address":"alias@example.com","type":"alias"}`)))
+			req.SetPathValue("name", "alice")
+			rr := httptest.NewRecorder()
+
+			newCreateEmailHandler(store).ServeHTTP(rr, req)
+
+			assertError(t, rr, tt.status, tt.message)
+		})
+	}
+}
+
+func TestDeleteEmailHandlerMapsUnsupported(t *testing.T) {
 	t.Parallel()
 
 	store := &mockAliasesStore{
 		getAccountResult: &model.Account{Name: "alice"},
-		insertEmailErr:   &pq.Error{Code: "23505"},
+		getEmailType:     "alias",
+		deleteEmailErr:   fmt.Errorf("%w: the primary address can not be removed", directory.ErrUnsupported),
 	}
-	req := asFullAdmin(httptest.NewRequest(http.MethodPost, "/accounts/alice/emails", strings.NewReader(`{"address":"alias@example.com","type":"alias"}`)))
+	req := httptest.NewRequest(http.MethodDelete, "/accounts/alice/emails/alias@example.com", nil)
 	req.SetPathValue("name", "alice")
+	req.SetPathValue("address", "alias@example.com")
 	rr := httptest.NewRecorder()
 
-	newCreateEmailHandler(store).ServeHTTP(rr, req)
+	newDeleteEmailHandler(store).ServeHTTP(rr, req)
 
-	if rr.Code != http.StatusConflict {
-		t.Fatalf("status code = %d, want %d", rr.Code, http.StatusConflict)
-	}
+	assertError(t, rr, http.StatusBadRequest, "not supported by Stalwart 1.0: the primary address can not be removed")
 }
 
 func TestDeleteEmailHandlerDeletesAlias(t *testing.T) {

@@ -3,11 +3,13 @@ package api
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 
+	"github.com/operinko-labs/stalwart-users/internal/directory"
 	"github.com/operinko-labs/stalwart-users/internal/model"
 )
 
@@ -272,4 +274,33 @@ func TestDeleteGroupHandlerReturnsInternalServerErrorOnUnexpectedError(t *testin
 	if rr.Code != http.StatusInternalServerError {
 		t.Fatalf("status code = %d, want %d", rr.Code, http.StatusInternalServerError)
 	}
+}
+
+func TestCreateGroupHandlerMapsUnsupported(t *testing.T) {
+	t.Parallel()
+
+	store := &mockGroupsStore{
+		getAccountResult: &model.Account{Name: "alice"},
+		addGroupErr:      fmt.Errorf("%w: group team@example.com does not exist", directory.ErrUnsupported),
+	}
+	req := asFullAdmin(httptest.NewRequest(http.MethodPost, "/accounts/alice/groups", strings.NewReader(`{"member_of":"team@example.com"}`)))
+	req.SetPathValue("name", "alice")
+	rr := httptest.NewRecorder()
+
+	newCreateGroupHandler(store).ServeHTTP(rr, req)
+
+	assertError(t, rr, http.StatusBadRequest, "not supported by Stalwart 1.0: group team@example.com does not exist")
+}
+
+func TestGroupHandlersMapMissingAccountFromStore(t *testing.T) {
+	t.Parallel()
+
+	store := &mockGroupsStore{getAccountResult: &model.Account{Name: "alice"}, listGroupsErr: errAccountNotFound}
+	req := httptest.NewRequest(http.MethodGet, "/accounts/alice/groups", nil)
+	req.SetPathValue("name", "alice")
+	rr := httptest.NewRecorder()
+
+	newListGroupsHandler(store).ServeHTTP(rr, req)
+
+	assertError(t, rr, http.StatusNotFound, "account not found")
 }

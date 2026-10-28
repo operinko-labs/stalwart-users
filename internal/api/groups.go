@@ -2,11 +2,11 @@ package api
 
 import (
 	"encoding/json"
-	"errors"
 	"net/http"
 
 	"github.com/operinko-labs/stalwart-users/internal/auth"
 	"github.com/operinko-labs/stalwart-users/internal/db"
+	"github.com/operinko-labs/stalwart-users/internal/directory"
 	"github.com/operinko-labs/stalwart-users/internal/model"
 )
 
@@ -24,25 +24,16 @@ type createGroupRequest struct {
 	MemberOf string `json:"member_of"`
 }
 
-func ListGroupsHandler(pool *db.Pool) http.HandlerFunc {
-	if pool == nil {
-		return databaseNotConfiguredHandler()
-	}
-	return newListGroupsHandler(pool)
+func ListGroupsHandler(store *directory.Store) http.HandlerFunc {
+	return newListGroupsHandler(store)
 }
 
-func CreateGroupHandler(pool *db.Pool) http.HandlerFunc {
-	if pool == nil {
-		return databaseNotConfiguredHandler()
-	}
-	return newCreateGroupHandler(pool)
+func CreateGroupHandler(store *directory.Store) http.HandlerFunc {
+	return newCreateGroupHandler(store)
 }
 
-func DeleteGroupHandler(pool *db.Pool) http.HandlerFunc {
-	if pool == nil {
-		return databaseNotConfiguredHandler()
-	}
-	return newDeleteGroupHandler(pool)
+func DeleteGroupHandler(store *directory.Store) http.HandlerFunc {
+	return newDeleteGroupHandler(store)
 }
 
 func newListGroupsHandler(store groupsStore) http.HandlerFunc {
@@ -55,7 +46,7 @@ func newListGroupsHandler(store groupsStore) http.HandlerFunc {
 
 		groups, err := store.ListGroups(r.PathValue("name"))
 		if err != nil {
-			writeError(w, http.StatusInternalServerError, err.Error())
+			writeStoreError(w, err)
 			return
 		}
 
@@ -98,7 +89,7 @@ func newCreateGroupHandler(store groupsStore) http.HandlerFunc {
 		}
 
 		if err := store.AddGroup(r.PathValue("name"), req.MemberOf); err != nil {
-			writeError(w, http.StatusInternalServerError, err.Error())
+			writeStoreError(w, err)
 			return
 		}
 
@@ -116,11 +107,7 @@ func newDeleteGroupHandler(store groupsStore) http.HandlerFunc {
 		}
 
 		if err := store.RemoveGroup(r.PathValue("name"), r.PathValue("group")); err != nil {
-			if errors.Is(err, errGroupMembershipNotFound) {
-				writeError(w, http.StatusNotFound, "group membership not found")
-				return
-			}
-			writeError(w, http.StatusInternalServerError, err.Error())
+			writeStoreError(w, err)
 			return
 		}
 

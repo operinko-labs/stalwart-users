@@ -1,16 +1,18 @@
 package api
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 
 	"github.com/operinko-labs/stalwart-users/internal/auth"
+	"github.com/operinko-labs/stalwart-users/internal/directory"
 	"github.com/operinko-labs/stalwart-users/internal/model"
+	"github.com/operinko-labs/stalwart-users/internal/stalwart"
 )
 
 type mockAccountsStore struct {
@@ -19,20 +21,15 @@ type mockAccountsStore struct {
 	getAccountResult   *model.Account
 	getAccountErr      error
 	createAccountErr   error
-	insertEmailErr     error
 	updateAccountErr   error
 	deleteAccountErr   error
 	addressInUse       bool
 
 	createdName        string
-	createdSecret      string
+	createdPassword    string
 	createdDescription string
 	createdType        string
 	createdQuota       int
-
-	insertedName    string
-	insertedAddress string
-	insertedType    string
 
 	updatedName        string
 	updatedDescription *string
@@ -40,11 +37,9 @@ type mockAccountsStore struct {
 	updatedActive      *bool
 
 	deletedName string
-	insertCalls int
 	createCalls int
 	updateCalls int
 	deleteCalls int
-	callOrder   *[]string
 }
 
 func (m *mockAccountsStore) ListAccounts() ([]model.Account, error) {
@@ -59,28 +54,14 @@ func (m *mockAccountsStore) GetAccount(name string) (*model.Account, error) {
 	return nil, m.getAccountErr
 }
 
-func (m *mockAccountsStore) CreateAccount(name, secret, description, accountType string, quota int) error {
+func (m *mockAccountsStore) CreateAccount(name, password, description, accountType string, quota int) error {
 	m.createCalls++
 	m.createdName = name
-	m.createdSecret = secret
+	m.createdPassword = password
 	m.createdDescription = description
 	m.createdType = accountType
 	m.createdQuota = quota
-	if m.callOrder != nil {
-		*m.callOrder = append(*m.callOrder, "db.create")
-	}
 	return m.createAccountErr
-}
-
-func (m *mockAccountsStore) InsertEmail(name, address, emailType string) error {
-	m.insertCalls++
-	m.insertedName = name
-	m.insertedAddress = address
-	m.insertedType = emailType
-	if m.callOrder != nil {
-		*m.callOrder = append(*m.callOrder, "db.insert_email")
-	}
-	return m.insertEmailErr
 }
 
 func (m *mockAccountsStore) AddressInUse(address string) (bool, error) {
@@ -99,42 +80,7 @@ func (m *mockAccountsStore) UpdateAccount(name string, description *string, quot
 func (m *mockAccountsStore) DeleteAccount(name string) error {
 	m.deleteCalls++
 	m.deletedName = name
-	if m.callOrder != nil {
-		*m.callOrder = append(*m.callOrder, "db.delete")
-	}
 	return m.deleteAccountErr
-}
-
-type mockStalwartClient struct {
-	createErr   error
-	deleteErr   error
-	createdName string
-	createdPass string
-	createdDesc string
-	deletedName string
-	createCalls int
-	deleteCalls int
-	callOrder   *[]string
-}
-
-func (m *mockStalwartClient) CreateAccount(_ context.Context, name, password, description string, _ int64) error {
-	m.createCalls++
-	m.createdName = name
-	m.createdPass = password
-	m.createdDesc = description
-	if m.callOrder != nil {
-		*m.callOrder = append(*m.callOrder, "stalwart.create")
-	}
-	return m.createErr
-}
-
-func (m *mockStalwartClient) DeleteAccount(_ context.Context, name string) error {
-	m.deleteCalls++
-	m.deletedName = name
-	if m.callOrder != nil {
-		*m.callOrder = append(*m.callOrder, "stalwart.delete")
-	}
-	return m.deleteErr
 }
 
 func asFullAdmin(req *http.Request) *http.Request {
@@ -185,7 +131,7 @@ func TestCreateAccountHandlerAllowsDomainAdminsOnTheirDomains(t *testing.T) {
 			req := asDomainAdmin(httptest.NewRequest(http.MethodPost, "/accounts", body), "client.fi")
 			rr := httptest.NewRecorder()
 
-			newCreateAccountHandler(store, nil).ServeHTTP(rr, req)
+			newCreateAccountHandler(store).ServeHTTP(rr, req)
 
 			if rr.Code != http.StatusCreated {
 				t.Fatalf("status code = %d, want %d; body=%s", rr.Code, http.StatusCreated, rr.Body.String())
@@ -216,17 +162,16 @@ func TestCreateAccountHandlerRejectsDomainAdminRequestsOutsideTheirRights(t *tes
 			t.Parallel()
 
 			store := &mockAccountsStore{}
-			stalwart := &mockStalwartClient{}
 			req := asDomainAdmin(httptest.NewRequest(http.MethodPost, "/accounts", strings.NewReader(tt.body)), "client.fi")
 			rr := httptest.NewRecorder()
 
-			newCreateAccountHandler(store, stalwart).ServeHTTP(rr, req)
+			newCreateAccountHandler(store).ServeHTTP(rr, req)
 
 			if rr.Code != http.StatusForbidden {
 				t.Fatalf("status code = %d, want %d; body=%s", rr.Code, http.StatusForbidden, rr.Body.String())
 			}
-			if store.createCalls != 0 || stalwart.createCalls != 0 {
-				t.Fatalf("create calls db=%d stalwart=%d, want none", store.createCalls, stalwart.createCalls)
+			if store.createCalls != 0 {
+				t.Fatalf("CreateAccount calls = %d, want none", store.createCalls)
 			}
 		})
 	}
@@ -236,18 +181,17 @@ func TestCreateAccountHandlerRejectsAddressesInUseForDomainAdmins(t *testing.T) 
 	t.Parallel()
 
 	store := &mockAccountsStore{addressInUse: true}
-	stalwart := &mockStalwartClient{}
 	body := strings.NewReader(`{"name":"ceo@client.fi","password":"secret"}`)
 	req := asDomainAdmin(httptest.NewRequest(http.MethodPost, "/accounts", body), "client.fi")
 	rr := httptest.NewRecorder()
 
-	newCreateAccountHandler(store, stalwart).ServeHTTP(rr, req)
+	newCreateAccountHandler(store).ServeHTTP(rr, req)
 
 	if rr.Code != http.StatusConflict {
 		t.Fatalf("status code = %d, want %d", rr.Code, http.StatusConflict)
 	}
-	if store.createCalls != 0 || stalwart.createCalls != 0 {
-		t.Fatalf("create calls db=%d stalwart=%d, want none", store.createCalls, stalwart.createCalls)
+	if store.createCalls != 0 {
+		t.Fatalf("CreateAccount calls = %d, want none", store.createCalls)
 	}
 }
 
@@ -259,7 +203,7 @@ func TestAccountHandlerRejectsQuotaChangesFromNonAdmins(t *testing.T) {
 	req.SetPathValue("name", "bob@client.fi")
 	rr := httptest.NewRecorder()
 
-	newAccountHandler(store, nil).ServeHTTP(rr, req)
+	newAccountHandler(store).ServeHTTP(rr, req)
 
 	if rr.Code != http.StatusForbidden {
 		t.Fatalf("status code = %d, want %d", rr.Code, http.StatusForbidden)
@@ -277,7 +221,7 @@ func TestAccountHandlerLetsNonAdminsPatchWithoutQuota(t *testing.T) {
 	req.SetPathValue("name", "bob@client.fi")
 	rr := httptest.NewRecorder()
 
-	newAccountHandler(store, nil).ServeHTTP(rr, req)
+	newAccountHandler(store).ServeHTTP(rr, req)
 
 	if rr.Code != http.StatusOK {
 		t.Fatalf("status code = %d, want %d", rr.Code, http.StatusOK)
@@ -338,7 +282,7 @@ func TestAccountHandlerGetsAccount(t *testing.T) {
 	req.SetPathValue("name", "alice")
 	rr := httptest.NewRecorder()
 
-	newAccountHandler(store, nil).ServeHTTP(rr, req)
+	newAccountHandler(store).ServeHTTP(rr, req)
 
 	if rr.Code != http.StatusOK {
 		t.Fatalf("status code = %d, want %d", rr.Code, http.StatusOK)
@@ -361,7 +305,7 @@ func TestAccountHandlerReturnsNotFoundWhenMissing(t *testing.T) {
 	req.SetPathValue("name", "missing")
 	rr := httptest.NewRecorder()
 
-	newAccountHandler(&mockAccountsStore{}, nil).ServeHTTP(rr, req)
+	newAccountHandler(&mockAccountsStore{}).ServeHTTP(rr, req)
 
 	if rr.Code != http.StatusNotFound {
 		t.Fatalf("status code = %d, want %d", rr.Code, http.StatusNotFound)
@@ -375,22 +319,22 @@ func TestCreateAccountHandlerValidatesRequiredFields(t *testing.T) {
 	req := asFullAdmin(httptest.NewRequest(http.MethodPost, "/accounts", body))
 	rr := httptest.NewRecorder()
 
-	newCreateAccountHandler(&mockAccountsStore{}, nil).ServeHTTP(rr, req)
+	newCreateAccountHandler(&mockAccountsStore{}).ServeHTTP(rr, req)
 
 	if rr.Code != http.StatusBadRequest {
 		t.Fatalf("status code = %d, want %d", rr.Code, http.StatusBadRequest)
 	}
 }
 
-func TestCreateAccountHandlerCreatesAccountWithDefaultTypeAndHash(t *testing.T) {
+func TestCreateAccountHandlerCreatesAccountWithDefaultType(t *testing.T) {
 	t.Parallel()
 
 	store := &mockAccountsStore{}
-	body := strings.NewReader(`{"name":"alice","password":"secret","description":"Alice","quota":25}`)
+	body := strings.NewReader(`{"name":"alice@example.com","password":"secret","description":"Alice","quota":25}`)
 	req := asFullAdmin(httptest.NewRequest(http.MethodPost, "/accounts", body))
 	rr := httptest.NewRecorder()
 
-	newCreateAccountHandler(store, nil).ServeHTTP(rr, req)
+	newCreateAccountHandler(store).ServeHTTP(rr, req)
 
 	if rr.Code != http.StatusCreated {
 		t.Fatalf("status code = %d, want %d; body=%s", rr.Code, http.StatusCreated, rr.Body.String())
@@ -398,38 +342,52 @@ func TestCreateAccountHandlerCreatesAccountWithDefaultTypeAndHash(t *testing.T) 
 	if store.createCalls != 1 {
 		t.Fatalf("CreateAccount calls = %d, want 1", store.createCalls)
 	}
+	if store.createdName != "alice@example.com" || store.createdPassword != "secret" || store.createdDescription != "Alice" || store.createdQuota != 25 {
+		t.Fatalf("created = (%q, %q, %q, %d), want request fields with plaintext password", store.createdName, store.createdPassword, store.createdDescription, store.createdQuota)
+	}
 	if store.createdType != "individual" {
 		t.Fatalf("type = %q, want %q", store.createdType, "individual")
 	}
-	if store.createdSecret == "secret" {
-		t.Fatal("password was not hashed")
-	}
-	if !auth.VerifyPassword("secret", store.createdSecret) {
-		t.Fatal("stored secret does not verify")
-	}
-	if store.insertCalls != 0 {
-		t.Fatalf("InsertEmail calls = %d, want 0", store.insertCalls)
-	}
 }
 
-func TestCreateAccountHandlerAddsPrimaryEmailForAddressNames(t *testing.T) {
+func TestCreateAccountWeakPassword(t *testing.T) {
 	t.Parallel()
 
-	store := &mockAccountsStore{}
+	store := &mockAccountsStore{createAccountErr: fmt.Errorf("create account: %w", stalwart.ErrInvalid{Description: "Password is too weak"})}
+	body := strings.NewReader(`{"name":"alice@example.com","password":"weak"}`)
+	req := asFullAdmin(httptest.NewRequest(http.MethodPost, "/accounts", body))
+	rr := httptest.NewRecorder()
+
+	newCreateAccountHandler(store).ServeHTTP(rr, req)
+
+	assertError(t, rr, http.StatusBadRequest, "Password is too weak")
+}
+
+func TestCreateAccountGroupUnsupported(t *testing.T) {
+	t.Parallel()
+
+	store := &mockAccountsStore{createAccountErr: fmt.Errorf("%w: groups can't be created", directory.ErrUnsupported)}
+	body := strings.NewReader(`{"name":"team@example.com","password":"secret","type":"group"}`)
+	req := asFullAdmin(httptest.NewRequest(http.MethodPost, "/accounts", body))
+	rr := httptest.NewRecorder()
+
+	newCreateAccountHandler(store).ServeHTTP(rr, req)
+
+	assertError(t, rr, http.StatusBadRequest, "not supported by Stalwart 1.0: groups can't be created")
+}
+
+func TestCreateAccountHandlerReturnsServerErrorWhenStoreFails(t *testing.T) {
+	t.Parallel()
+
+	store := &mockAccountsStore{createAccountErr: errors.New("stalwart unavailable")}
 	body := strings.NewReader(`{"name":"alice@example.com","password":"secret"}`)
 	req := asFullAdmin(httptest.NewRequest(http.MethodPost, "/accounts", body))
 	rr := httptest.NewRecorder()
 
-	newCreateAccountHandler(store, nil).ServeHTTP(rr, req)
+	newCreateAccountHandler(store).ServeHTTP(rr, req)
 
-	if rr.Code != http.StatusCreated {
-		t.Fatalf("status code = %d, want %d", rr.Code, http.StatusCreated)
-	}
-	if store.insertCalls != 1 {
-		t.Fatalf("InsertEmail calls = %d, want 1", store.insertCalls)
-	}
-	if store.insertedName != "alice@example.com" || store.insertedAddress != "alice@example.com" || store.insertedType != "primary" {
-		t.Fatalf("inserted email = (%q, %q, %q), want primary self address", store.insertedName, store.insertedAddress, store.insertedType)
+	if rr.Code != http.StatusInternalServerError {
+		t.Fatalf("status code = %d, want %d", rr.Code, http.StatusInternalServerError)
 	}
 }
 
@@ -442,7 +400,7 @@ func TestAccountHandlerPatchesAccount(t *testing.T) {
 	rr := httptest.NewRecorder()
 	store := &mockAccountsStore{}
 
-	newAccountHandler(store, nil).ServeHTTP(rr, req)
+	newAccountHandler(store).ServeHTTP(rr, req)
 
 	if rr.Code != http.StatusOK {
 		t.Fatalf("status code = %d, want %d", rr.Code, http.StatusOK)
@@ -464,6 +422,19 @@ func TestAccountHandlerPatchesAccount(t *testing.T) {
 	}
 }
 
+func TestPatchAccountDeactivate400(t *testing.T) {
+	t.Parallel()
+
+	store := &mockAccountsStore{updateAccountErr: fmt.Errorf("%w: accounts can't be disabled", directory.ErrUnsupported)}
+	req := asFullAdmin(httptest.NewRequest(http.MethodPatch, "/accounts/alice", strings.NewReader(`{"active":false}`)))
+	req.SetPathValue("name", "alice")
+	rr := httptest.NewRecorder()
+
+	newAccountHandler(store).ServeHTTP(rr, req)
+
+	assertError(t, rr, http.StatusBadRequest, "not supported by Stalwart 1.0: accounts can't be disabled")
+}
+
 func TestAccountHandlerRejectsInvalidPatchJSON(t *testing.T) {
 	t.Parallel()
 
@@ -471,7 +442,7 @@ func TestAccountHandlerRejectsInvalidPatchJSON(t *testing.T) {
 	req.SetPathValue("name", "alice")
 	rr := httptest.NewRecorder()
 
-	newAccountHandler(&mockAccountsStore{}, nil).ServeHTTP(rr, req)
+	newAccountHandler(&mockAccountsStore{}).ServeHTTP(rr, req)
 
 	if rr.Code != http.StatusBadRequest {
 		t.Fatalf("status code = %d, want %d", rr.Code, http.StatusBadRequest)
@@ -486,7 +457,7 @@ func TestAccountHandlerDeletesAccount(t *testing.T) {
 	rr := httptest.NewRecorder()
 	store := &mockAccountsStore{}
 
-	newAccountHandler(store, nil).ServeHTTP(rr, req)
+	newAccountHandler(store).ServeHTTP(rr, req)
 
 	if rr.Code != http.StatusNoContent {
 		t.Fatalf("status code = %d, want %d", rr.Code, http.StatusNoContent)
@@ -503,137 +474,24 @@ func TestAccountHandlerDeleteReturnsNotFound(t *testing.T) {
 	req.SetPathValue("name", "alice")
 	rr := httptest.NewRecorder()
 
-	newAccountHandler(&mockAccountsStore{deleteAccountErr: errAccountNotFound}, nil).ServeHTTP(rr, req)
+	newAccountHandler(&mockAccountsStore{deleteAccountErr: errAccountNotFound}).ServeHTTP(rr, req)
 
 	if rr.Code != http.StatusNotFound {
 		t.Fatalf("status code = %d, want %d", rr.Code, http.StatusNotFound)
 	}
 }
 
-func TestCreateAccountHandlerCallsJMAP(t *testing.T) {
-	t.Parallel()
+func assertError(t *testing.T, rr *httptest.ResponseRecorder, status int, message string) {
+	t.Helper()
 
-	order := []string{}
-	store := &mockAccountsStore{callOrder: &order}
-	stalwart := &mockStalwartClient{callOrder: &order}
-	body := strings.NewReader(`{"name":"alice@example.com","password":"secret"}`)
-	req := asFullAdmin(httptest.NewRequest(http.MethodPost, "/accounts", body))
-	rr := httptest.NewRecorder()
-
-	newCreateAccountHandler(store, stalwart).ServeHTTP(rr, req)
-
-	if rr.Code != http.StatusCreated {
-		t.Fatalf("status code = %d, want %d", rr.Code, http.StatusCreated)
+	if rr.Code != status {
+		t.Fatalf("status code = %d, want %d; body=%s", rr.Code, status, rr.Body.String())
 	}
-	if stalwart.createCalls != 1 {
-		t.Fatalf("CreateAccount calls = %d, want 1", stalwart.createCalls)
+	var body map[string]string
+	if err := json.Unmarshal(rr.Body.Bytes(), &body); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
 	}
-	if stalwart.createdName != "alice@example.com" || stalwart.createdPass != "secret" {
-		t.Fatalf("created account = %#v, want propagated request fields", stalwart)
-	}
-	if len(order) < 2 || order[0] != "stalwart.create" || order[1] != "db.create" {
-		t.Fatalf("call order = %#v, want stalwart create before db create", order)
-	}
-}
-
-func TestCreateAccountHandlerReturnsErrorWhenJMAPFails(t *testing.T) {
-	t.Parallel()
-
-	store := &mockAccountsStore{}
-	stalwart := &mockStalwartClient{createErr: errors.New("stalwart unavailable")}
-	body := strings.NewReader(`{"name":"alice@example.com","password":"secret"}`)
-	req := asFullAdmin(httptest.NewRequest(http.MethodPost, "/accounts", body))
-	rr := httptest.NewRecorder()
-
-	newCreateAccountHandler(store, stalwart).ServeHTTP(rr, req)
-
-	if rr.Code != http.StatusInternalServerError {
-		t.Fatalf("status code = %d, want %d", rr.Code, http.StatusInternalServerError)
-	}
-	if store.createCalls != 0 {
-		t.Fatalf("CreateAccount calls = %d, want 0", store.createCalls)
-	}
-	if stalwart.createCalls != 1 {
-		t.Fatalf("CreateAccount calls = %d, want 1", stalwart.createCalls)
-	}
-}
-
-func TestCreateAccountHandlerRollsBackOnDBFailure(t *testing.T) {
-	t.Parallel()
-
-	order := []string{}
-	store := &mockAccountsStore{createAccountErr: errors.New("db unavailable"), callOrder: &order}
-	stalwart := &mockStalwartClient{callOrder: &order}
-	body := strings.NewReader(`{"name":"alice@example.com","password":"secret"}`)
-	req := asFullAdmin(httptest.NewRequest(http.MethodPost, "/accounts", body))
-	rr := httptest.NewRecorder()
-
-	newCreateAccountHandler(store, stalwart).ServeHTTP(rr, req)
-
-	if rr.Code != http.StatusInternalServerError {
-		t.Fatalf("status code = %d, want %d", rr.Code, http.StatusInternalServerError)
-	}
-	if stalwart.createCalls != 1 {
-		t.Fatalf("CreateAccount calls = %d, want 1", stalwart.createCalls)
-	}
-	if store.createCalls != 1 {
-		t.Fatalf("CreateAccount calls = %d, want 1", store.createCalls)
-	}
-	if stalwart.deleteCalls != 1 || stalwart.deletedName != "alice@example.com" {
-		t.Fatalf("DeleteAccount calls=%d name=%q, want 1/alice@example.com", stalwart.deleteCalls, stalwart.deletedName)
-	}
-	if store.insertCalls != 0 {
-		t.Fatalf("InsertEmail calls = %d, want 0", store.insertCalls)
-	}
-	if len(order) != 3 || order[0] != "stalwart.create" || order[1] != "db.create" || order[2] != "stalwart.delete" {
-		t.Fatalf("call order = %#v, want create then rollback delete", order)
-	}
-}
-
-func TestDeleteAccountHandlerCallsJMAP(t *testing.T) {
-	t.Parallel()
-
-	order := []string{}
-	store := &mockAccountsStore{callOrder: &order}
-	stalwart := &mockStalwartClient{callOrder: &order}
-	req := httptest.NewRequest(http.MethodDelete, "/accounts/alice", nil)
-	req.SetPathValue("name", "alice")
-	rr := httptest.NewRecorder()
-
-	newAccountHandler(store, stalwart).ServeHTTP(rr, req)
-
-	if rr.Code != http.StatusNoContent {
-		t.Fatalf("status code = %d, want %d", rr.Code, http.StatusNoContent)
-	}
-	if stalwart.deleteCalls != 1 || stalwart.deletedName != "alice" {
-		t.Fatalf("DeleteAccount calls=%d name=%q, want 1/alice", stalwart.deleteCalls, stalwart.deletedName)
-	}
-	if len(order) != 2 || order[0] != "db.delete" || order[1] != "stalwart.delete" {
-		t.Fatalf("call order = %#v, want db delete before stalwart delete", order)
-	}
-	if store.deleteCalls != 1 || store.deletedName != "alice" {
-		t.Fatalf("DeleteAccount calls=%d name=%q, want 1/alice", store.deleteCalls, store.deletedName)
-	}
-}
-
-func TestDeleteAccountHandlerContinuesWhenJMAPFails(t *testing.T) {
-	t.Parallel()
-
-	store := &mockAccountsStore{}
-	stalwart := &mockStalwartClient{deleteErr: errors.New("stalwart unavailable")}
-	req := httptest.NewRequest(http.MethodDelete, "/accounts/alice", nil)
-	req.SetPathValue("name", "alice")
-	rr := httptest.NewRecorder()
-
-	newAccountHandler(store, stalwart).ServeHTTP(rr, req)
-
-	if rr.Code != http.StatusNoContent {
-		t.Fatalf("status code = %d, want %d", rr.Code, http.StatusNoContent)
-	}
-	if store.deleteCalls != 1 {
-		t.Fatalf("DeleteAccount calls = %d, want 1", store.deleteCalls)
-	}
-	if stalwart.deleteCalls != 1 {
-		t.Fatalf("Stalwart DeleteAccount calls = %d, want 1", stalwart.deleteCalls)
+	if body["error"] != message {
+		t.Fatalf("error = %q, want %q", body["error"], message)
 	}
 }

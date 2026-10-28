@@ -8,7 +8,7 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/operinko-labs/stalwart-users/internal/db"
+	"github.com/operinko-labs/stalwart-users/internal/directory"
 	"github.com/operinko-labs/stalwart-users/internal/model"
 )
 
@@ -26,11 +26,8 @@ type adminDomainsBody struct {
 
 // AdminDomainsHandler reads and replaces the domains an account administers.
 // Only full admins reach it.
-func AdminDomainsHandler(pool *db.Pool) http.HandlerFunc {
-	if pool == nil {
-		return databaseNotConfiguredHandler()
-	}
-	return newAdminDomainsHandler(pool)
+func AdminDomainsHandler(store *directory.Store) http.HandlerFunc {
+	return newAdminDomainsHandler(store)
 }
 
 func newAdminDomainsHandler(store adminDomainsStore) http.HandlerFunc {

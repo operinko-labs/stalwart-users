@@ -2,11 +2,9 @@ package auth
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
-	"errors"
 	"net/http"
-	"time"
+	"strings"
 )
 
 type AuthenticatedUser struct {
@@ -18,9 +16,15 @@ type CredentialAuthenticator interface {
 	Authenticate(ctx context.Context, username, password string) (*AuthenticatedUser, error)
 }
 
-type SQLDirectoryAuthenticator struct {
-	db      *sql.DB
-	timeout time.Duration
+type credentialChecker interface {
+	Authenticate(ctx context.Context, username, password string) (bool, error)
+}
+
+// StalwartAuthenticator checks credentials against Stalwart and takes the
+// admin flag from the access store.
+type StalwartAuthenticator struct {
+	checker credentialChecker
+	admins  AccessStore
 }
 
 type loginRequest struct {
@@ -28,56 +32,24 @@ type loginRequest struct {
 	Password string `json:"password"`
 }
 
-var passwordVerifier = VerifyPassword
-
-var dummyPasswordHash = func() string {
-	hash, err := HashSSHA512("dummy-password")
-	if err != nil {
-		panic(err)
-	}
-
-	return hash
-}()
-
-func NewSQLDirectoryAuthenticator(database *sql.DB) *SQLDirectoryAuthenticator {
-	return &SQLDirectoryAuthenticator{
-		db:      database,
-		timeout: 5 * time.Second,
-	}
+func NewStalwartAuthenticator(checker credentialChecker, admins AccessStore) *StalwartAuthenticator {
+	return &StalwartAuthenticator{checker: checker, admins: admins}
 }
 
-func (a *SQLDirectoryAuthenticator) Authenticate(ctx context.Context, username, password string) (*AuthenticatedUser, error) {
-	if a == nil || a.db == nil {
-		return nil, errors.New("database not configured")
+func (a *StalwartAuthenticator) Authenticate(ctx context.Context, username, password string) (*AuthenticatedUser, error) {
+	username = strings.ToLower(strings.TrimSpace(username))
+
+	ok, err := a.checker.Authenticate(ctx, username, password)
+	if err != nil || !ok {
+		return nil, err
 	}
 
-	queryCtx, cancel := context.WithTimeout(ctx, a.timeout)
-	defer cancel()
-
-	var name string
-	var secret string
-	var active bool
-	var isAdmin bool
-	err := a.db.QueryRowContext(queryCtx, `SELECT name, secret, active, is_admin FROM directory.accounts WHERE name = $1`, username).
-		Scan(&name, &secret, &active, &isAdmin)
-	if errors.Is(err, sql.ErrNoRows) {
-		passwordVerifier(password, dummyPasswordHash)
-		return nil, nil
-	}
+	isAdmin, err := a.admins.IsAdmin(username)
 	if err != nil {
 		return nil, err
 	}
 
-	if !active {
-		passwordVerifier(password, dummyPasswordHash)
-		return nil, nil
-	}
-
-	if !passwordVerifier(password, secret) {
-		return nil, nil
-	}
-
-	return &AuthenticatedUser{Username: name, IsAdmin: isAdmin}, nil
+	return &AuthenticatedUser{Username: username, IsAdmin: isAdmin}, nil
 }
 
 func LoginHandler(authenticator CredentialAuthenticator, tokens *TokenManager) http.HandlerFunc {

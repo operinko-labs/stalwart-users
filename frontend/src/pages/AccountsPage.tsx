@@ -28,13 +28,11 @@ export default function AccountsPage() {
   const [editData, setEditData] = useState<{
     description: string
     quota: string
-    active: boolean
     // Comma-separated; null until loaded, so an early save can't clear them.
     adminDomains: string | null
   }>({
     description: '',
     quota: '',
-    active: true,
     adminDomains: null,
   })
   const [editError, setEditError] = useState<string | null>(null)
@@ -113,7 +111,6 @@ export default function AccountsPage() {
     setEditData({
       description: account.description,
       quota: account.quota ? account.quota.toString() : '',
-      active: account.active,
       adminDomains: null,
     })
     setEditError(null)
@@ -139,7 +136,6 @@ export default function AccountsPage() {
       await api.accounts.update(editingAccount, {
         description: editData.description,
         ...(isAdmin ? { quota: editData.quota ? parseInt(editData.quota, 10) : 0 } : {}),
-        active: editData.active,
       })
       if (isAdmin && editData.adminDomains !== null) {
         await api.accounts.setAdminDomains(
@@ -153,15 +149,6 @@ export default function AccountsPage() {
       setEditError(err instanceof Error ? err.message : String(err))
     } finally {
       setEditLoading(false)
-    }
-  }
-
-  const toggleActive = async (account: Account) => {
-    try {
-      await api.accounts.update(account.name, { active: !account.active })
-      await fetchAccounts()
-    } catch (err: unknown) {
-      alert(err instanceof Error ? err.message : String(err))
     }
   }
 
@@ -389,7 +376,6 @@ export default function AccountsPage() {
                  <th>Full Name</th>
                  <th>Type</th>
                  <th>Quota</th>
-                 <th>Status</th>
                  <th>Actions</th>
                </tr>
             </thead>
@@ -400,15 +386,6 @@ export default function AccountsPage() {
                   <td>{account.description}</td>
                   <td><span className="badge badge-neutral">{account.type}</span></td>
                   <td>{formatQuota(account.quota)}</td>
-                  <td>
-                    <button
-                      className={`badge-btn ${account.active ? 'badge-success' : 'badge-error'}`}
-                      onClick={() => toggleActive(account)}
-                      title="Toggle active status"
-                    >
-                      {account.active ? 'Active' : 'Inactive'}
-                    </button>
-                  </td>
                   <td>
                     <div className="action-buttons">
                       <button className="btn-icon" onClick={() => handleOpenGroups(account.name)} title="Manage Groups">
@@ -481,16 +458,6 @@ export default function AccountsPage() {
                   />
                 </div>
               )}
-              <div className="form-group checkbox-group">
-                <label className="form-label">
-                  <input
-                    type="checkbox"
-                    checked={editData.active}
-                    onChange={(e) => setEditData({ ...editData, active: e.target.checked })}
-                  />
-                  Active
-                </label>
-              </div>
               <div className="modal-actions">
                 <button type="button" className="btn-secondary" onClick={() => setEditingAccount(null)}>
                   Cancel

@@ -3,6 +3,7 @@ package directory
 import (
 	"context"
 	"errors"
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
@@ -25,6 +26,22 @@ type fakeClient struct {
 	patch       map[string]any
 	updateCalls int
 	deleted     []string
+
+	authOK       bool
+	authSeen     [2]string
+	passwordFor  stalwart.Account
+	passwordSent string
+	passwordErr  error
+}
+
+func (f *fakeClient) Authenticate(_ context.Context, username, password string) (bool, error) {
+	f.authSeen = [2]string{username, password}
+	return f.authOK, nil
+}
+
+func (f *fakeClient) SetPassword(_ context.Context, account stalwart.Account, secret string) error {
+	f.passwordFor, f.passwordSent = account, secret
+	return f.passwordErr
 }
 
 func (f *fakeClient) ListAccounts(context.Context) ([]stalwart.Account, error) {
@@ -522,5 +539,54 @@ func TestRemoveGroupMissing(t *testing.T) {
 	}
 	if client.updateCalls != 0 {
 		t.Fatal("client.UpdateAccount called")
+	}
+}
+
+func TestAuthenticateDelegates(t *testing.T) {
+	t.Parallel()
+
+	store, client, _ := newStore()
+	client.authOK = true
+	ok, err := store.Authenticate(context.Background(), "dora@client.fi", "pw")
+	if err != nil || !ok {
+		t.Fatalf("Authenticate() = %v, %v; want true, nil", ok, err)
+	}
+	if client.authSeen != [2]string{"dora@client.fi", "pw"} {
+		t.Fatalf("client saw %v", client.authSeen)
+	}
+}
+
+func TestSetPasswordFindsAccount(t *testing.T) {
+	t.Parallel()
+
+	store, client, _ := newStore()
+	if err := store.SetPassword("dora@CLIENT.fi", "new-Password-1"); err != nil {
+		t.Fatalf("SetPassword() error = %v", err)
+	}
+	if client.passwordFor.ID != "a1" || client.passwordSent != "new-Password-1" {
+		t.Fatalf("SetPassword sent %q for %#v", client.passwordSent, client.passwordFor)
+	}
+}
+
+func TestSetPasswordPassesInvalid(t *testing.T) {
+	t.Parallel()
+
+	store, client, _ := newStore()
+	client.passwordErr = fmt.Errorf("update account: %w", stalwart.ErrInvalid{Description: "Password is too weak"})
+	var invalid stalwart.ErrInvalid
+	if err := store.SetPassword("dora@client.fi", "x"); !errors.As(err, &invalid) || invalid.Description != "Password is too weak" {
+		t.Fatalf("err = %v, want ErrInvalid", err)
+	}
+}
+
+func TestSetPasswordUnknown(t *testing.T) {
+	t.Parallel()
+
+	store, client, _ := newStore()
+	if err := store.SetPassword("team@client.fi", "pw"); !errors.Is(err, db.ErrAccountNotFound) {
+		t.Fatalf("err = %v, want ErrAccountNotFound", err)
+	}
+	if client.passwordSent != "" {
+		t.Fatal("client.SetPassword called")
 	}
 }

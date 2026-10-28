@@ -2,8 +2,6 @@ package db
 
 import (
 	"context"
-	"database/sql"
-	"errors"
 	"time"
 )
 
@@ -77,20 +75,4 @@ func (p *Pool) DeleteAdminDomains(name string) error {
 
 	_, err := p.DB().ExecContext(ctx, `DELETE FROM directory.domain_admins WHERE name = $1`, name)
 	return err
-}
-
-func (p *Pool) IsAdmin(name string) (bool, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	var isAdmin bool
-	err := p.DB().QueryRowContext(ctx, `SELECT COALESCE(is_admin, false) FROM directory.accounts WHERE name = $1`, name).Scan(&isAdmin)
-	if errors.Is(err, sql.ErrNoRows) {
-		return false, nil
-	}
-	if err != nil {
-		return false, err
-	}
-
-	return isAdmin, nil
 }

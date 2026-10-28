@@ -1,16 +1,15 @@
 package api
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
-	"log"
 	"net/http"
-	"strings"
 
 	"github.com/operinko-labs/stalwart-users/internal/auth"
 	"github.com/operinko-labs/stalwart-users/internal/db"
+	"github.com/operinko-labs/stalwart-users/internal/directory"
 	"github.com/operinko-labs/stalwart-users/internal/model"
+	"github.com/operinko-labs/stalwart-users/internal/stalwart"
 )
 
 var errAccountNotFound = db.ErrAccountNotFound
@@ -18,37 +17,22 @@ var errAccountNotFound = db.ErrAccountNotFound
 type accountsStore interface {
 	ListAccounts() ([]model.Account, error)
 	GetAccount(name string) (*model.Account, error)
-	CreateAccount(name, secret, description, accountType string, quota int) error
-	InsertEmail(name, address, emailType string) error
+	CreateAccount(name, password, description, accountType string, quota int) error
 	UpdateAccount(name string, description *string, quota *int, active *bool) error
 	DeleteAccount(name string) error
 	AddressInUse(address string) (bool, error)
 }
 
-type stalwartClient interface {
-	CreateAccount(ctx context.Context, name, password, description string, diskQuota int64) error
-	DeleteAccount(ctx context.Context, name string) error
+func AccountsHandler(store *directory.Store) http.HandlerFunc {
+	return newAccountsHandler(store)
 }
 
-func AccountsHandler(pool *db.Pool) http.HandlerFunc {
-	if pool == nil {
-		return databaseNotConfiguredHandler()
-	}
-	return newAccountsHandler(pool)
+func AccountHandler(store *directory.Store) http.HandlerFunc {
+	return newAccountHandler(store)
 }
 
-func AccountHandler(pool *db.Pool, jmap stalwartClient) http.HandlerFunc {
-	if pool == nil {
-		return databaseNotConfiguredHandler()
-	}
-	return newAccountHandler(pool, jmap)
-}
-
-func CreateAccountHandler(pool *db.Pool, jmap stalwartClient) http.HandlerFunc {
-	if pool == nil {
-		return databaseNotConfiguredHandler()
-	}
-	return newCreateAccountHandler(pool, jmap)
+func CreateAccountHandler(store *directory.Store) http.HandlerFunc {
+	return newCreateAccountHandler(store)
 }
 
 func newAccountsHandler(store accountsStore) http.HandlerFunc {
@@ -76,7 +60,7 @@ func newAccountsHandler(store accountsStore) http.HandlerFunc {
 	}
 }
 
-func newAccountHandler(store accountsStore, jmap stalwartClient) http.HandlerFunc {
+func newAccountHandler(store accountsStore) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
 		case http.MethodGet:
@@ -84,7 +68,7 @@ func newAccountHandler(store accountsStore, jmap stalwartClient) http.HandlerFun
 		case http.MethodPatch:
 			handlePatchAccount(w, r, store)
 		case http.MethodDelete:
-			handleDeleteAccount(w, r, store, jmap)
+			handleDeleteAccount(w, r, store)
 		default:
 			writeJSONHeader(w)
 			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -92,7 +76,7 @@ func newAccountHandler(store accountsStore, jmap stalwartClient) http.HandlerFun
 	}
 }
 
-func newCreateAccountHandler(store accountsStore, jmap stalwartClient) http.HandlerFunc {
+func newCreateAccountHandler(store accountsStore) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		writeJSONHeader(w)
 
@@ -133,39 +117,14 @@ func newCreateAccountHandler(store accountsStore, jmap stalwartClient) http.Hand
 			}
 		}
 
-		secret, err := auth.HashPassword(req.Password)
-		if err != nil {
-			writeError(w, http.StatusBadRequest, err.Error())
-			return
-		}
-
 		accountType := req.Type
 		if accountType == "" {
 			accountType = "individual"
 		}
 
-		if jmap != nil {
-			if err := jmap.CreateAccount(r.Context(), req.Name, req.Password, req.Description, int64(req.Quota)); err != nil {
-				log.Printf("Failed to create Stalwart account for %s: %v", req.Name, err)
-				writeError(w, http.StatusInternalServerError, err.Error())
-				return
-			}
-		}
-
-		if err := store.CreateAccount(req.Name, secret, req.Description, accountType, req.Quota); err != nil {
-			if jmap != nil {
-				if rollbackErr := jmap.DeleteAccount(r.Context(), req.Name); rollbackErr != nil {
-					log.Printf("Failed to roll back Stalwart account for %s after DB create failure: %v", req.Name, rollbackErr)
-				}
-			}
-			writeError(w, http.StatusInternalServerError, err.Error())
+		if err := store.CreateAccount(req.Name, req.Password, req.Description, accountType, req.Quota); err != nil {
+			writeStoreError(w, err)
 			return
-		}
-
-		if strings.Contains(req.Name, "@") {
-			if err := store.InsertEmail(req.Name, req.Name, "primary"); err != nil {
-				log.Printf("Failed to insert primary email for %s: %v", req.Name, err)
-			}
 		}
 
 		w.WriteHeader(http.StatusCreated)
@@ -205,11 +164,7 @@ func handlePatchAccount(w http.ResponseWriter, r *http.Request, store accountsSt
 	}
 
 	if err := store.UpdateAccount(r.PathValue("name"), req.Description, req.Quota, req.Active); err != nil {
-		if errors.Is(err, errAccountNotFound) {
-			writeError(w, http.StatusNotFound, "account not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeStoreError(w, err)
 		return
 	}
 
@@ -217,23 +172,12 @@ func handlePatchAccount(w http.ResponseWriter, r *http.Request, store accountsSt
 	_ = json.NewEncoder(w).Encode(map[string]string{"status": "updated"})
 }
 
-func handleDeleteAccount(w http.ResponseWriter, r *http.Request, store accountsStore, jmap stalwartClient) {
+func handleDeleteAccount(w http.ResponseWriter, r *http.Request, store accountsStore) {
 	writeJSONHeader(w)
-	name := r.PathValue("name")
 
-	if err := store.DeleteAccount(name); err != nil {
-		if errors.Is(err, errAccountNotFound) {
-			writeError(w, http.StatusNotFound, "account not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, err.Error())
+	if err := store.DeleteAccount(r.PathValue("name")); err != nil {
+		writeStoreError(w, err)
 		return
-	}
-
-	if jmap != nil {
-		if err := jmap.DeleteAccount(r.Context(), name); err != nil {
-			log.Printf("Failed to delete Stalwart account for %s: %v", name, err)
-		}
 	}
 
 	w.WriteHeader(http.StatusNoContent)
@@ -248,9 +192,21 @@ func writeError(w http.ResponseWriter, statusCode int, message string) {
 	_ = json.NewEncoder(w).Encode(map[string]string{"error": message})
 }
 
-func databaseNotConfiguredHandler() http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		writeJSONHeader(w)
-		writeError(w, http.StatusServiceUnavailable, "database not configured")
+// writeStoreError maps an account store error to its HTTP response.
+func writeStoreError(w http.ResponseWriter, err error) {
+	var invalid stalwart.ErrInvalid
+	switch {
+	case errors.Is(err, errAccountNotFound):
+		writeError(w, http.StatusNotFound, "account not found")
+	case errors.Is(err, errGroupMembershipNotFound):
+		writeError(w, http.StatusNotFound, "group membership not found")
+	case errors.Is(err, directory.ErrAddressInUse):
+		writeError(w, http.StatusConflict, "address already in use")
+	case errors.Is(err, directory.ErrUnsupported):
+		writeError(w, http.StatusBadRequest, err.Error())
+	case errors.As(err, &invalid):
+		writeError(w, http.StatusBadRequest, invalid.Description)
+	default:
+		writeError(w, http.StatusInternalServerError, err.Error())
 	}
 }

@@ -1,24 +1,89 @@
 package main
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/operinko-labs/stalwart-users/internal/auth"
+	"github.com/operinko-labs/stalwart-users/internal/directory"
+	"github.com/operinko-labs/stalwart-users/internal/stalwart"
 )
 
 const serverTestJWTSecret = "0123456789abcdef0123456789abcdef"
 
-func TestNewServerHandlerRegistersPasswordChangeRoute(t *testing.T) {
-	t.Parallel()
+// emptyStalwart is a Stalwart with no accounts or domains.
+type emptyStalwart struct{}
 
-	handler, err := newServerHandler(serverConfig{
-		JWTSecret: serverTestJWTSecret,
-	}, nil)
+func (emptyStalwart) ListAccounts(context.Context) ([]stalwart.Account, error) { return nil, nil }
+func (emptyStalwart) ListDomains(context.Context) ([]stalwart.Domain, error)   { return nil, nil }
+func (emptyStalwart) CreateAccount(context.Context, string, string, string, int64) error {
+	return nil
+}
+func (emptyStalwart) UpdateAccount(context.Context, string, map[string]any) error { return nil }
+func (emptyStalwart) DeleteAccount(context.Context, string) error                 { return nil }
+func (emptyStalwart) Authenticate(context.Context, string, string) (bool, error) {
+	return false, nil
+}
+func (emptyStalwart) SetPassword(context.Context, stalwart.Account, string) error { return nil }
+
+type noAdminDomains struct{}
+
+func (noAdminDomains) ListAdminDomains(string) ([]string, error) { return nil, nil }
+func (noAdminDomains) SetAdminDomains(string, []string) error    { return nil }
+func (noAdminDomains) DeleteAdminDomains(string) error           { return nil }
+
+func newTestServerHandler(t *testing.T) http.Handler {
+	t.Helper()
+
+	handler, err := newServerHandler(serverConfig{JWTSecret: serverTestJWTSecret}, nil, directory.New(emptyStalwart{}, noAdminDomains{}))
 	if err != nil {
 		t.Fatalf("newServerHandler() error = %v", err)
 	}
+
+	return handler
+}
+
+func TestLoadConfigRequiresStalwartAndDatabase(t *testing.T) {
+	required := []string{"DATABASE_URL", "STALWART_URL", "STALWART_ADMIN_TOKEN"}
+
+	for _, missing := range required {
+		t.Run(missing, func(t *testing.T) {
+			t.Setenv("JWT_SECRET", serverTestJWTSecret)
+			for _, name := range required {
+				t.Setenv(name, "set")
+			}
+			t.Setenv(missing, "")
+
+			_, err := loadConfigFromEnv()
+			if err == nil || !strings.Contains(err.Error(), missing) {
+				t.Fatalf("loadConfigFromEnv() error = %v, want one naming %s", err, missing)
+			}
+		})
+	}
+}
+
+func TestLoadConfigAcceptsCompleteConfig(t *testing.T) {
+	t.Setenv("JWT_SECRET", serverTestJWTSecret)
+	t.Setenv("DATABASE_URL", "postgres://db")
+	t.Setenv("STALWART_URL", "http://stalwart")
+	t.Setenv("STALWART_ADMIN_TOKEN", "token")
+
+	cfg, err := loadConfigFromEnv()
+	if err != nil {
+		t.Fatalf("loadConfigFromEnv() error = %v", err)
+	}
+	if cfg.DatabaseURL != "postgres://db" || cfg.StalwartURL != "http://stalwart" || cfg.StalwartAdminToken != "token" {
+		t.Fatalf("cfg = %#v", cfg)
+	}
+}
+
+func TestNewServerHandlerRegistersPasswordChangeRoute(t *testing.T) {
+	t.Parallel()
+
+	handler := newTestServerHandler(t)
 
 	req := httptest.NewRequest(http.MethodPut, "/api/accounts/alice/password", nil)
 	req.AddCookie(&http.Cookie{Name: "token", Value: "invalid-token"})
@@ -42,19 +107,17 @@ func TestNewServerHandlerAuthorizesRoutes(t *testing.T) {
 		isAdmin  bool
 		want     int
 	}{
-		// 503 means the request reached its handler, which has no database here.
-		{name: "admin reads admin domains", method: http.MethodGet, path: "/api/accounts/dora@client.fi/admin-domains", username: "admin@example.com", isAdmin: true, want: http.StatusServiceUnavailable},
-		{name: "admin sets admin domains", method: http.MethodPut, path: "/api/accounts/dora@client.fi/admin-domains", username: "admin@example.com", isAdmin: true, want: http.StatusServiceUnavailable},
+		// 404 and 400 mean the request reached its handler: the test Stalwart
+		// has no accounts and the requests have no body.
+		{name: "admin reads admin domains", method: http.MethodGet, path: "/api/accounts/dora@client.fi/admin-domains", username: "admin@example.com", isAdmin: true, want: http.StatusNotFound},
+		{name: "admin sets admin domains", method: http.MethodPut, path: "/api/accounts/dora@client.fi/admin-domains", username: "admin@example.com", isAdmin: true, want: http.StatusNotFound},
 		{name: "user reads own admin domains", method: http.MethodGet, path: "/api/accounts/bob@client.fi/admin-domains", username: "bob@client.fi", want: http.StatusForbidden},
-		{name: "user changes own password", method: http.MethodPut, path: "/api/accounts/bob@client.fi/password", username: "bob@client.fi", want: http.StatusServiceUnavailable},
+		{name: "user changes own password", method: http.MethodPut, path: "/api/accounts/bob@client.fi/password", username: "bob@client.fi", want: http.StatusBadRequest},
 		{name: "user changes another password", method: http.MethodPut, path: "/api/accounts/eve@client.fi/password", username: "bob@client.fi", want: http.StatusForbidden},
 		{name: "user adds own address", method: http.MethodPost, path: "/api/accounts/bob@client.fi/emails", username: "bob@client.fi", want: http.StatusForbidden},
 	}
 
-	handler, err := newServerHandler(serverConfig{JWTSecret: serverTestJWTSecret}, nil)
-	if err != nil {
-		t.Fatalf("newServerHandler() error = %v", err)
-	}
+	handler := newTestServerHandler(t)
 	tokens, err := auth.NewTokenManager(serverTestJWTSecret)
 	if err != nil {
 		t.Fatalf("NewTokenManager() error = %v", err)
@@ -79,29 +142,6 @@ func TestNewServerHandlerAuthorizesRoutes(t *testing.T) {
 				t.Fatalf("status code = %d, want %d; body=%s", rr.Code, tt.want, rr.Body.String())
 			}
 		})
-	}
-}
-
-func TestNewServerHandlerRegistersAccountRoutesWithOptionalStalwartConfig(t *testing.T) {
-	t.Parallel()
-
-	handler, err := newServerHandler(serverConfig{
-		JWTSecret:          serverTestJWTSecret,
-		StalwartURL:        "http://stalwart.internal",
-		StalwartAdminToken: "token",
-	}, nil)
-	if err != nil {
-		t.Fatalf("newServerHandler() error = %v", err)
-	}
-
-	req := httptest.NewRequest(http.MethodGet, "/api/accounts/alice", nil)
-	req.AddCookie(&http.Cookie{Name: "token", Value: "invalid-token"})
-	rr := httptest.NewRecorder()
-
-	handler.ServeHTTP(rr, req)
-
-	if rr.Code != http.StatusUnauthorized {
-		t.Fatalf("status code = %d, want %d", rr.Code, http.StatusUnauthorized)
 	}
 }
 

@@ -1,7 +1,6 @@
 package main
 
 import (
-	"database/sql"
 	"fmt"
 	"log"
 	"net/http"
@@ -11,6 +10,7 @@ import (
 	"github.com/operinko-labs/stalwart-users/internal/api"
 	"github.com/operinko-labs/stalwart-users/internal/auth"
 	"github.com/operinko-labs/stalwart-users/internal/db"
+	"github.com/operinko-labs/stalwart-users/internal/directory"
 	"github.com/operinko-labs/stalwart-users/internal/stalwart"
 )
 
@@ -37,32 +37,24 @@ func main() {
 	log.Printf("  Port: %d", cfg.Port)
 	log.Printf("  Path Prefix: %s", cfg.PathPrefix)
 	log.Printf("  CORS Origin: %s", cfg.CORSOrigin)
-	if cfg.DatabaseURL != "" {
-		log.Printf("  Database: configured")
+	log.Printf("  Stalwart: %s", cfg.StalwartURL)
+
+	pool, err := db.NewPool(cfg.DatabaseURL)
+	if err != nil {
+		log.Fatalf("Failed to connect to database: %v", err)
 	}
-	if cfg.StalwartURL != "" && cfg.StalwartAdminToken != "" {
-		log.Printf("  Stalwart JMAP: configured (%s)", cfg.StalwartURL)
-	} else {
-		log.Printf("  Stalwart JMAP: disabled")
+	defer func() {
+		if err := pool.Close(); err != nil {
+			log.Printf("Failed to close database pool: %v", err)
+		}
+	}()
+	if err := pool.EnsureDomainAdminsTable(); err != nil {
+		log.Fatalf("Failed to create domain admins table: %v", err)
 	}
 
-	var pool *db.Pool
-	if cfg.DatabaseURL != "" {
-		pool, err = db.NewPool(cfg.DatabaseURL)
-		if err != nil {
-			log.Fatalf("Failed to connect to database: %v", err)
-		}
-		defer func() {
-			if err := pool.Close(); err != nil {
-				log.Printf("Failed to close database pool: %v", err)
-			}
-		}()
-		if err := pool.EnsureDomainAdminsTable(); err != nil {
-			log.Fatalf("Failed to create domain admins table: %v", err)
-		}
-	}
+	store := directory.New(stalwart.NewClient(cfg.StalwartURL, cfg.StalwartAdminToken), pool)
 
-	handler, err := newServerHandler(cfg, pool)
+	handler, err := newServerHandler(cfg, pool, store)
 	if err != nil {
 		log.Fatalf("Failed to create server: %v", err)
 	}
@@ -102,54 +94,52 @@ func loadConfigFromEnv() (serverConfig, error) {
 	if cfg.JWTSecret == "" {
 		return serverConfig{}, auth.ErrMissingJWTSecret
 	}
+	for _, required := range []struct{ name, value string }{
+		{"DATABASE_URL", cfg.DatabaseURL},
+		{"STALWART_URL", cfg.StalwartURL},
+		{"STALWART_ADMIN_TOKEN", cfg.StalwartAdminToken},
+	} {
+		if required.value == "" {
+			return serverConfig{}, fmt.Errorf("%s is required", required.name)
+		}
+	}
 
 	return cfg, nil
 }
 
-func newServerHandler(cfg serverConfig, pool *db.Pool) (http.Handler, error) {
+func newServerHandler(cfg serverConfig, pool *db.Pool, store *directory.Store) (http.Handler, error) {
 	tokens, err := auth.NewTokenManager(cfg.JWTSecret)
 	if err != nil {
 		return nil, err
 	}
 
-	authenticator := auth.NewSQLDirectoryAuthenticator(dbFromPool(pool))
-
-	var stalwartClient *stalwart.Client
-	if cfg.StalwartURL != "" && cfg.StalwartAdminToken != "" {
-		stalwartClient = stalwart.NewClient(cfg.StalwartURL, cfg.StalwartAdminToken)
-	}
-
-	// A nil *db.Pool must not become a non-nil interface value.
-	var access auth.AccessStore
-	if pool != nil {
-		access = pool
-	}
+	authenticator := auth.NewStalwartAuthenticator(store, store)
 
 	rootMux := http.NewServeMux()
 	rootMux.HandleFunc("GET /healthz", api.HealthHandler(pool))
 
 	apiRouter := http.NewServeMux()
 	apiRouter.HandleFunc("POST /auth/login", auth.LoginHandler(authenticator, tokens))
-	apiRouter.HandleFunc("GET /auth/me", auth.MeHandler(tokens, access))
+	apiRouter.HandleFunc("GET /auth/me", auth.MeHandler(tokens, store))
 	apiRouter.HandleFunc("POST /auth/logout", auth.LogoutHandler(tokens))
 
 	protectedRouter := http.NewServeMux()
-	protectedRouter.HandleFunc("PUT /accounts/{name}/password", api.ChangePasswordHandler(pool))
-	protectedRouter.HandleFunc("GET /accounts/{name}/admin-domains", api.AdminDomainsHandler(pool))
-	protectedRouter.HandleFunc("PUT /accounts/{name}/admin-domains", api.AdminDomainsHandler(pool))
-	protectedRouter.HandleFunc("GET /accounts", api.AccountsHandler(pool))
-	protectedRouter.HandleFunc("GET /accounts/{name}", api.AccountHandler(pool, stalwartClient))
-	protectedRouter.HandleFunc("GET /accounts/{name}/emails", api.ListEmailsHandler(pool))
-	protectedRouter.HandleFunc("GET /accounts/{name}/groups", api.ListGroupsHandler(pool))
-	protectedRouter.HandleFunc("POST /accounts", api.CreateAccountHandler(pool, stalwartClient))
-	protectedRouter.HandleFunc("POST /accounts/{name}/emails", api.CreateEmailHandler(pool))
-	protectedRouter.HandleFunc("POST /accounts/{name}/groups", api.CreateGroupHandler(pool))
-	protectedRouter.HandleFunc("PATCH /accounts/{name}", api.AccountHandler(pool, stalwartClient))
-	protectedRouter.HandleFunc("DELETE /accounts/{name}", api.AccountHandler(pool, stalwartClient))
-	protectedRouter.HandleFunc("DELETE /accounts/{name}/emails/{address}", api.DeleteEmailHandler(pool))
-	protectedRouter.HandleFunc("DELETE /accounts/{name}/groups/{group}", api.DeleteGroupHandler(pool))
+	protectedRouter.HandleFunc("PUT /accounts/{name}/password", api.ChangePasswordHandler(store))
+	protectedRouter.HandleFunc("GET /accounts/{name}/admin-domains", api.AdminDomainsHandler(store))
+	protectedRouter.HandleFunc("PUT /accounts/{name}/admin-domains", api.AdminDomainsHandler(store))
+	protectedRouter.HandleFunc("GET /accounts", api.AccountsHandler(store))
+	protectedRouter.HandleFunc("GET /accounts/{name}", api.AccountHandler(store))
+	protectedRouter.HandleFunc("GET /accounts/{name}/emails", api.ListEmailsHandler(store))
+	protectedRouter.HandleFunc("GET /accounts/{name}/groups", api.ListGroupsHandler(store))
+	protectedRouter.HandleFunc("POST /accounts", api.CreateAccountHandler(store))
+	protectedRouter.HandleFunc("POST /accounts/{name}/emails", api.CreateEmailHandler(store))
+	protectedRouter.HandleFunc("POST /accounts/{name}/groups", api.CreateGroupHandler(store))
+	protectedRouter.HandleFunc("PATCH /accounts/{name}", api.AccountHandler(store))
+	protectedRouter.HandleFunc("DELETE /accounts/{name}", api.AccountHandler(store))
+	protectedRouter.HandleFunc("DELETE /accounts/{name}/emails/{address}", api.DeleteEmailHandler(store))
+	protectedRouter.HandleFunc("DELETE /accounts/{name}/groups/{group}", api.DeleteGroupHandler(store))
 
-	apiRouter.Handle("/", tokens.Middleware(auth.AuthorizationMiddleware(protectedRouter, access)))
+	apiRouter.Handle("/", tokens.Middleware(auth.AuthorizationMiddleware(protectedRouter, store)))
 	rootMux.Handle(apiBasePath+"/", http.StripPrefix(apiBasePath, apiRouter))
 
 	if cfg.PathPrefix != "" {
@@ -157,14 +147,6 @@ func newServerHandler(cfg serverConfig, pool *db.Pool) (http.Handler, error) {
 	}
 
 	return newCORSMiddleware(cfg.CORSOrigin)(rootMux), nil
-}
-
-func dbFromPool(pool *db.Pool) *sql.DB {
-	if pool == nil {
-		return nil
-	}
-
-	return pool.DB()
 }
 
 func newCORSMiddleware(origin string) func(http.Handler) http.Handler {

@@ -2,12 +2,10 @@ package api
 
 import (
 	"encoding/json"
-	"errors"
 	"net/http"
 
-	"github.com/lib/pq"
 	"github.com/operinko-labs/stalwart-users/internal/auth"
-	"github.com/operinko-labs/stalwart-users/internal/db"
+	"github.com/operinko-labs/stalwart-users/internal/directory"
 	"github.com/operinko-labs/stalwart-users/internal/model"
 )
 
@@ -20,25 +18,16 @@ type aliasesStore interface {
 	AddressInUse(address string) (bool, error)
 }
 
-func ListEmailsHandler(pool *db.Pool) http.HandlerFunc {
-	if pool == nil {
-		return databaseNotConfiguredHandler()
-	}
-	return newListEmailsHandler(pool)
+func ListEmailsHandler(store *directory.Store) http.HandlerFunc {
+	return newListEmailsHandler(store)
 }
 
-func CreateEmailHandler(pool *db.Pool) http.HandlerFunc {
-	if pool == nil {
-		return databaseNotConfiguredHandler()
-	}
-	return newCreateEmailHandler(pool)
+func CreateEmailHandler(store *directory.Store) http.HandlerFunc {
+	return newCreateEmailHandler(store)
 }
 
-func DeleteEmailHandler(pool *db.Pool) http.HandlerFunc {
-	if pool == nil {
-		return databaseNotConfiguredHandler()
-	}
-	return newDeleteEmailHandler(pool)
+func DeleteEmailHandler(store *directory.Store) http.HandlerFunc {
+	return newDeleteEmailHandler(store)
 }
 
 func newListEmailsHandler(store aliasesStore) http.HandlerFunc {
@@ -51,7 +40,7 @@ func newListEmailsHandler(store aliasesStore) http.HandlerFunc {
 
 		emails, err := store.ListEmails(r.PathValue("name"))
 		if err != nil {
-			writeError(w, http.StatusInternalServerError, err.Error())
+			writeStoreError(w, err)
 			return
 		}
 
@@ -107,12 +96,7 @@ func newCreateEmailHandler(store aliasesStore) http.HandlerFunc {
 		}
 
 		if err := store.InsertEmail(r.PathValue("name"), req.Address, emailType); err != nil {
-			var pqErr *pq.Error
-			if errors.As(err, &pqErr) && pqErr.Code == "23505" {
-				writeError(w, http.StatusConflict, "email already exists")
-				return
-			}
-			writeError(w, http.StatusInternalServerError, err.Error())
+			writeStoreError(w, err)
 			return
 		}
 
@@ -131,7 +115,7 @@ func newDeleteEmailHandler(store aliasesStore) http.HandlerFunc {
 
 		emailType, err := store.GetEmailType(r.PathValue("name"), r.PathValue("address"))
 		if err != nil {
-			writeError(w, http.StatusInternalServerError, err.Error())
+			writeStoreError(w, err)
 			return
 		}
 		if emailType == "primary" {
@@ -140,7 +124,7 @@ func newDeleteEmailHandler(store aliasesStore) http.HandlerFunc {
 		}
 
 		if err := store.DeleteEmail(r.PathValue("name"), r.PathValue("address")); err != nil {
-			writeError(w, http.StatusInternalServerError, err.Error())
+			writeStoreError(w, err)
 			return
 		}
 

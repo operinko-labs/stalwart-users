@@ -2,15 +2,12 @@ package auth
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
-
-	sqlmock "github.com/DATA-DOG/go-sqlmock"
 )
 
 const loginTestJWTSecret = testJWTSecret
@@ -30,155 +27,76 @@ func (s *stubAuthenticator) Authenticate(_ context.Context, username, password s
 	return s.user, s.err
 }
 
-func TestSQLDirectoryAuthenticatorAuthenticatesActiveUser(t *testing.T) {
+type fakeChecker struct {
+	ok   bool
+	err  error
+	seen [2]string
+}
+
+func (f *fakeChecker) Authenticate(_ context.Context, username, password string) (bool, error) {
+	f.seen = [2]string{username, password}
+	return f.ok, f.err
+}
+
+type fakeAccess struct {
+	admins map[string]bool
+	asked  []string
+}
+
+func (f *fakeAccess) IsAdmin(name string) (bool, error) {
+	f.asked = append(f.asked, name)
+	return f.admins[name], nil
+}
+
+func (f *fakeAccess) ListAdminDomains(string) ([]string, error) { return nil, nil }
+
+func TestStalwartAuthenticatorSuccess(t *testing.T) {
 	t.Parallel()
 
-	database, mock, err := sqlmock.New()
-	if err != nil {
-		t.Fatalf("sqlmock.New() error = %v", err)
-	}
-	defer func() { _ = database.Close() }()
+	checker := &fakeChecker{ok: true}
+	access := &fakeAccess{admins: map[string]bool{"root@vaderrp.com": true}}
+	authenticator := NewStalwartAuthenticator(checker, access)
 
-	hash, err := HashPassword("secret")
-	if err != nil {
-		t.Fatalf("HashPassword() error = %v", err)
-	}
-
-	rows := sqlmock.NewRows([]string{"name", "secret", "active", "is_admin"}).AddRow("alice@example.com", hash, true, false)
-	mock.ExpectQuery(`SELECT name, secret, active, is_admin FROM directory.accounts WHERE name = \$1`).WithArgs("alice@example.com").WillReturnRows(rows)
-
-	authenticator := NewSQLDirectoryAuthenticator(database)
-	user, err := authenticator.Authenticate(context.Background(), "alice@example.com", "secret")
+	user, err := authenticator.Authenticate(context.Background(), "  Root@VaderRP.com ", "secret")
 	if err != nil {
 		t.Fatalf("Authenticate() error = %v", err)
 	}
-	if user == nil || user.Username != "alice@example.com" {
-		t.Fatalf("user = %#v, want alice@example.com", user)
+	if user == nil || user.Username != "root@vaderrp.com" || !user.IsAdmin {
+		t.Fatalf("user = %#v, want root@vaderrp.com admin", user)
 	}
-	if err := mock.ExpectationsWereMet(); err != nil {
-		t.Fatalf("ExpectationsWereMet() error = %v", err)
+	if checker.seen != [2]string{"root@vaderrp.com", "secret"} {
+		t.Fatalf("checker saw %v, want normalised username", checker.seen)
+	}
+
+	checker.ok = true
+	user, err = authenticator.Authenticate(context.Background(), "bob@client.fi", "secret")
+	if err != nil || user == nil || user.IsAdmin {
+		t.Fatalf("user = %#v, err = %v; want non-admin bob", user, err)
 	}
 }
 
-func TestSQLDirectoryAuthenticatorRejectsInactiveOrInvalidUser(t *testing.T) {
+func TestStalwartAuthenticatorInvalid(t *testing.T) {
 	t.Parallel()
 
-	tests := []struct {
-		name     string
-		rows     *sqlmock.Rows
-		password string
-	}{
-		{name: "inactive", rows: sqlmock.NewRows([]string{"name", "secret", "active", "is_admin"}).AddRow("alice@example.com", mustHash(t, "secret"), false, false), password: "secret"},
-		{name: "wrong password", rows: sqlmock.NewRows([]string{"name", "secret", "active", "is_admin"}).AddRow("alice@example.com", mustHash(t, "secret"), true, false), password: "wrong"},
+	access := &fakeAccess{}
+	authenticator := NewStalwartAuthenticator(&fakeChecker{}, access)
+
+	user, err := authenticator.Authenticate(context.Background(), "bob@client.fi", "wrong")
+	if err != nil || user != nil {
+		t.Fatalf("Authenticate() = %#v, %v; want nil, nil", user, err)
 	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-
-			database, mock, err := sqlmock.New()
-			if err != nil {
-				t.Fatalf("sqlmock.New() error = %v", err)
-			}
-			defer func() { _ = database.Close() }()
-
-			mock.ExpectQuery(`SELECT name, secret, active, is_admin FROM directory.accounts WHERE name = \$1`).WithArgs("alice@example.com").WillReturnRows(tt.rows)
-
-			authenticator := NewSQLDirectoryAuthenticator(database)
-			user, err := authenticator.Authenticate(context.Background(), "alice@example.com", tt.password)
-			if err != nil {
-				t.Fatalf("Authenticate() error = %v", err)
-			}
-			if user != nil {
-				t.Fatalf("user = %#v, want nil", user)
-			}
-			if err := mock.ExpectationsWereMet(); err != nil {
-				t.Fatalf("ExpectationsWereMet() error = %v", err)
-			}
-		})
+	if len(access.asked) != 0 {
+		t.Fatalf("IsAdmin asked for %v after failed login", access.asked)
 	}
 }
 
-func TestSQLDirectoryAuthenticatorReturnsNilForMissingUser(t *testing.T) {
+func TestStalwartAuthenticatorCheckerError(t *testing.T) {
 	t.Parallel()
 
-	database, mock, err := sqlmock.New()
-	if err != nil {
-		t.Fatalf("sqlmock.New() error = %v", err)
-	}
-	defer func() { _ = database.Close() }()
+	authenticator := NewStalwartAuthenticator(&fakeChecker{err: errors.New("down")}, &fakeAccess{})
 
-	mock.ExpectQuery(`SELECT name, secret, active, is_admin FROM directory.accounts WHERE name = \$1`).WithArgs("missing@example.com").WillReturnError(sql.ErrNoRows)
-
-	authenticator := NewSQLDirectoryAuthenticator(database)
-	user, err := authenticator.Authenticate(context.Background(), "missing@example.com", "secret")
-	if err != nil {
-		t.Fatalf("Authenticate() error = %v", err)
-	}
-	if user != nil {
-		t.Fatalf("user = %#v, want nil", user)
-	}
-	if err := mock.ExpectationsWereMet(); err != nil {
-		t.Fatalf("ExpectationsWereMet() error = %v", err)
-	}
-}
-
-func TestSQLDirectoryAuthenticatorUsesDummyVerificationForMissingOrInactiveUser(t *testing.T) {
-	// Not parallel: this test replaces the global passwordVerifier
-	originalVerifier := passwordVerifier
-	defer func() { passwordVerifier = originalVerifier }()
-
-	var calls []string
-	passwordVerifier = func(password, encoded string) bool {
-		calls = append(calls, encoded)
-		return false
-	}
-
-	missingDB, missingMock, err := sqlmock.New()
-	if err != nil {
-		t.Fatalf("sqlmock.New() error = %v", err)
-	}
-	defer func() { _ = missingDB.Close() }()
-	missingMock.ExpectQuery(`SELECT name, secret, active, is_admin FROM directory.accounts WHERE name = \$1`).WithArgs("missing@example.com").WillReturnError(sql.ErrNoRows)
-
-	missingAuthenticator := NewSQLDirectoryAuthenticator(missingDB)
-	missingUser, err := missingAuthenticator.Authenticate(context.Background(), "missing@example.com", "secret")
-	if err != nil {
-		t.Fatalf("Authenticate() error = %v", err)
-	}
-	if missingUser != nil {
-		t.Fatalf("user = %#v, want nil", missingUser)
-	}
-
-	inactiveDB, inactiveMock, err := sqlmock.New()
-	if err != nil {
-		t.Fatalf("sqlmock.New() error = %v", err)
-	}
-	defer func() { _ = inactiveDB.Close() }()
-	inactiveRows := sqlmock.NewRows([]string{"name", "secret", "active", "is_admin"}).AddRow("alice@example.com", mustHash(t, "stored-secret"), false, false)
-	inactiveMock.ExpectQuery(`SELECT name, secret, active, is_admin FROM directory.accounts WHERE name = \$1`).WithArgs("alice@example.com").WillReturnRows(inactiveRows)
-
-	inactiveAuthenticator := NewSQLDirectoryAuthenticator(inactiveDB)
-	inactiveUser, err := inactiveAuthenticator.Authenticate(context.Background(), "alice@example.com", "secret")
-	if err != nil {
-		t.Fatalf("Authenticate() error = %v", err)
-	}
-	if inactiveUser != nil {
-		t.Fatalf("user = %#v, want nil", inactiveUser)
-	}
-
-	if err := missingMock.ExpectationsWereMet(); err != nil {
-		t.Fatalf("missing ExpectationsWereMet() error = %v", err)
-	}
-	if err := inactiveMock.ExpectationsWereMet(); err != nil {
-		t.Fatalf("inactive ExpectationsWereMet() error = %v", err)
-	}
-
-	if len(calls) != 2 {
-		t.Fatalf("passwordVerifier call count = %d, want 2", len(calls))
-	}
-	if calls[0] != dummyPasswordHash || calls[1] != dummyPasswordHash {
-		t.Fatalf("passwordVerifier hashes = %#v, want dummy hash for both missing and inactive users", calls)
+	if user, err := authenticator.Authenticate(context.Background(), "bob@client.fi", "pw"); err == nil || user != nil {
+		t.Fatalf("Authenticate() = %#v, %v; want error", user, err)
 	}
 }
 
@@ -275,15 +193,4 @@ func TestLoginHandlerValidatesRequestBody(t *testing.T) {
 	if rr.Code != http.StatusBadRequest {
 		t.Fatalf("status code = %d, want %d", rr.Code, http.StatusBadRequest)
 	}
-}
-
-func mustHash(t *testing.T, password string) string {
-	t.Helper()
-
-	hash, err := HashPassword(password)
-	if err != nil {
-		t.Fatalf("HashPassword() error = %v", err)
-	}
-
-	return hash
 }

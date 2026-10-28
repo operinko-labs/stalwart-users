@@ -6,11 +6,13 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"time"
 
 	"github.com/operinko-labs/stalwart-users/internal/api"
 	"github.com/operinko-labs/stalwart-users/internal/auth"
 	"github.com/operinko-labs/stalwart-users/internal/db"
 	"github.com/operinko-labs/stalwart-users/internal/directory"
+	"github.com/operinko-labs/stalwart-users/internal/oidc"
 	"github.com/operinko-labs/stalwart-users/internal/stalwart"
 )
 
@@ -24,6 +26,10 @@ type serverConfig struct {
 	PathPrefix         string
 	CORSOrigin         string
 	Port               int
+	OIDCIssuer         string
+	OIDCClientID       string
+	OIDCClientSecret   string
+	OIDCRedirectURL    string
 }
 
 func main() {
@@ -38,6 +44,7 @@ func main() {
 	log.Printf("  Path Prefix: %s", cfg.PathPrefix)
 	log.Printf("  CORS Origin: %s", cfg.CORSOrigin)
 	log.Printf("  Stalwart: %s", cfg.StalwartURL)
+	log.Printf("  OIDC issuer: %s", cfg.OIDCIssuer)
 
 	pool, err := db.NewPool(cfg.DatabaseURL)
 	if err != nil {
@@ -86,6 +93,10 @@ func loadConfigFromEnv() (serverConfig, error) {
 		PathPrefix:         os.Getenv("PATH_PREFIX"),
 		CORSOrigin:         os.Getenv("CORS_ORIGIN"),
 		Port:               port,
+		OIDCIssuer:         os.Getenv("OIDC_ISSUER"),
+		OIDCClientID:       os.Getenv("OIDC_CLIENT_ID"),
+		OIDCClientSecret:   os.Getenv("OIDC_CLIENT_SECRET"),
+		OIDCRedirectURL:    os.Getenv("OIDC_REDIRECT_URL"),
 	}
 
 	if cfg.CORSOrigin == "" {
@@ -98,6 +109,10 @@ func loadConfigFromEnv() (serverConfig, error) {
 		{"DATABASE_URL", cfg.DatabaseURL},
 		{"STALWART_URL", cfg.StalwartURL},
 		{"STALWART_ADMIN_TOKEN", cfg.StalwartAdminToken},
+		{"OIDC_ISSUER", cfg.OIDCIssuer},
+		{"OIDC_CLIENT_ID", cfg.OIDCClientID},
+		{"OIDC_CLIENT_SECRET", cfg.OIDCClientSecret},
+		{"OIDC_REDIRECT_URL", cfg.OIDCRedirectURL},
 	} {
 		if required.value == "" {
 			return serverConfig{}, fmt.Errorf("%s is required", required.name)
@@ -113,15 +128,25 @@ func newServerHandler(cfg serverConfig, pool *db.Pool, store *directory.Store) (
 		return nil, err
 	}
 
-	authenticator := auth.NewStalwartAuthenticator(store, store)
+	tokens.SetPaths(cfg.PathPrefix, apiBasePath)
+
+	oidcClient := oidc.New(oidc.Config{
+		Issuer:       cfg.OIDCIssuer,
+		ClientID:     cfg.OIDCClientID,
+		ClientSecret: cfg.OIDCClientSecret,
+		RedirectURL:  cfg.OIDCRedirectURL,
+	}, &http.Client{Timeout: 15 * time.Second})
+	// One store for every handler that needs a session's OAuth tokens.
+	oauthTokens := auth.NewTokenStore()
 
 	rootMux := http.NewServeMux()
 	rootMux.HandleFunc("GET /healthz", api.HealthHandler(pool))
 
 	apiRouter := http.NewServeMux()
-	apiRouter.HandleFunc("POST /auth/login", auth.LoginHandler(authenticator, tokens))
+	apiRouter.HandleFunc("GET /auth/login", auth.LoginStartHandler(oidcClient, tokens))
+	apiRouter.HandleFunc("GET /auth/callback", auth.CallbackHandler(oidcClient, store, tokens, oauthTokens))
 	apiRouter.HandleFunc("GET /auth/me", auth.MeHandler(tokens, store))
-	apiRouter.HandleFunc("POST /auth/logout", auth.LogoutHandler(tokens))
+	apiRouter.HandleFunc("POST /auth/logout", auth.LogoutHandler(tokens, oauthTokens))
 
 	protectedRouter := http.NewServeMux()
 	protectedRouter.HandleFunc("PUT /accounts/{name}/password", api.ChangePasswordHandler(store))

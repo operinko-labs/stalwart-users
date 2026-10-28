@@ -40,7 +40,9 @@ type meResponse struct {
 	AdminDomains []string `json:"adminDomains"`
 }
 
-func LogoutHandler(tokens *TokenManager) http.HandlerFunc {
+// LogoutHandler ends the stalwart-users session and forgets its OAuth tokens. It
+// doesn't end the user's Stalwart login session.
+func LogoutHandler(tokens *TokenManager, store *TokenStore) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		writeJSONHeader(w)
 
@@ -49,6 +51,9 @@ func LogoutHandler(tokens *TokenManager) http.HandlerFunc {
 			return
 		}
 
+		if session, err := tokens.ReadSession(r); err == nil && session.ID != "" {
+			store.Delete(session.ID)
+		}
 		tokens.ClearCookie(w)
 		w.WriteHeader(http.StatusOK)
 		_ = json.NewEncoder(w).Encode(map[string]string{"status": "logged out"})

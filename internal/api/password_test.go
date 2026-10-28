@@ -261,7 +261,7 @@ func serveChangePasswordRequest(t *testing.T, store passwordsStore, rr *httptest
 		t.Fatalf("NewTokenManager() error = %v", err)
 	}
 
-	token, err := tokens.GenerateToken(username, isAdmin)
+	token, _, err := tokens.GenerateToken(username, isAdmin)
 	if err != nil {
 		t.Fatalf("GenerateToken() error = %v", err)
 	}

@@ -7,6 +7,8 @@ import (
 	"net/http/httptest"
 	"slices"
 	"testing"
+
+	"github.com/operinko-labs/stalwart-users/internal/oidc"
 )
 
 func TestMeHandlerReturnsCurrentSession(t *testing.T) {
@@ -17,7 +19,7 @@ func TestMeHandlerReturnsCurrentSession(t *testing.T) {
 		t.Fatalf("NewTokenManager() error = %v", err)
 	}
 
-	token, err := tokens.GenerateToken("alice@example.com", true)
+	token, _, err := tokens.GenerateToken("alice@example.com", true)
 	if err != nil {
 		t.Fatalf("GenerateToken() error = %v", err)
 	}
@@ -63,7 +65,7 @@ func TestMeHandlerReturnsAdminDomains(t *testing.T) {
 			if err != nil {
 				t.Fatalf("NewTokenManager() error = %v", err)
 			}
-			token, err := tokens.GenerateToken(tt.username, tt.isAdmin)
+			token, _, err := tokens.GenerateToken(tt.username, tt.isAdmin)
 			if err != nil {
 				t.Fatalf("GenerateToken() error = %v", err)
 			}
@@ -98,7 +100,7 @@ func TestMeHandlerReturnsServerErrorWhenDomainLookupFails(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewTokenManager() error = %v", err)
 	}
-	token, err := tokens.GenerateToken("dora@client.fi", false)
+	token, _, err := tokens.GenerateToken("dora@client.fi", false)
 	if err != nil {
 		t.Fatalf("GenerateToken() error = %v", err)
 	}
@@ -139,7 +141,7 @@ func TestLogoutHandlerClearsSessionCookie(t *testing.T) {
 	}
 
 	rr := httptest.NewRecorder()
-	LogoutHandler(tokens).ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "/api/auth/logout", nil))
+	LogoutHandler(tokens, NewTokenStore()).ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "/api/auth/logout", nil))
 
 	if rr.Code != http.StatusOK {
 		t.Fatalf("status code = %d, want %d", rr.Code, http.StatusOK)
@@ -154,5 +156,36 @@ func TestLogoutHandlerClearsSessionCookie(t *testing.T) {
 	}
 	if cookies[0].Name != tokenCookieName || cookies[0].MaxAge != -1 {
 		t.Fatalf("cookie = %#v, want cleared token cookie", cookies[0])
+	}
+}
+
+func TestLogoutDeletesStoredTokens(t *testing.T) {
+	t.Parallel()
+
+	tokens, err := NewTokenManager(testJWTSecret)
+	if err != nil {
+		t.Fatalf("NewTokenManager() error = %v", err)
+	}
+	store := NewTokenStore()
+	token, id, err := tokens.GenerateToken("dora@client.fi", false)
+	if err != nil {
+		t.Fatalf("GenerateToken() error = %v", err)
+	}
+	store.Put(id, oidc.Tokens{AccessToken: "a"})
+	store.Put("other-session", oidc.Tokens{AccessToken: "b"})
+
+	req := httptest.NewRequest(http.MethodPost, "/api/auth/logout", nil)
+	req.AddCookie(&http.Cookie{Name: tokenCookieName, Value: token})
+	rr := httptest.NewRecorder()
+	LogoutHandler(tokens, store).ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status code = %d, want %d", rr.Code, http.StatusOK)
+	}
+	if _, ok := store.Get(id); ok {
+		t.Fatal("logout kept the session's tokens")
+	}
+	if _, ok := store.Get("other-session"); !ok {
+		t.Fatal("logout deleted another session's tokens")
 	}
 }

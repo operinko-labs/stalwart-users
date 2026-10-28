@@ -2,8 +2,10 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 
@@ -63,8 +65,11 @@ func newTestServerHandler(t *testing.T) http.Handler {
 	return handler
 }
 
-func TestLoadConfigRequiresStalwartAndDatabase(t *testing.T) {
-	required := []string{"DATABASE_URL", "STALWART_URL", "STALWART_ADMIN_TOKEN"}
+func TestLoadConfigRequiresStalwartDatabaseAndOIDC(t *testing.T) {
+	required := []string{
+		"DATABASE_URL", "STALWART_URL", "STALWART_ADMIN_TOKEN",
+		"OIDC_ISSUER", "OIDC_CLIENT_ID", "OIDC_CLIENT_SECRET", "OIDC_REDIRECT_URL",
+	}
 
 	for _, missing := range required {
 		t.Run(missing, func(t *testing.T) {
@@ -87,12 +92,18 @@ func TestLoadConfigAcceptsCompleteConfig(t *testing.T) {
 	t.Setenv("DATABASE_URL", "postgres://db")
 	t.Setenv("STALWART_URL", "http://stalwart")
 	t.Setenv("STALWART_ADMIN_TOKEN", "token")
+	t.Setenv("OIDC_ISSUER", "https://mail.example.com")
+	t.Setenv("OIDC_CLIENT_ID", "stalwart-users")
+	t.Setenv("OIDC_CLIENT_SECRET", "client-secret")
+	t.Setenv("OIDC_REDIRECT_URL", "https://users.example.com/api/auth/callback")
 
 	cfg, err := loadConfigFromEnv()
 	if err != nil {
 		t.Fatalf("loadConfigFromEnv() error = %v", err)
 	}
-	if cfg.DatabaseURL != "postgres://db" || cfg.StalwartURL != "http://stalwart" || cfg.StalwartAdminToken != "token" {
+	if cfg.DatabaseURL != "postgres://db" || cfg.StalwartURL != "http://stalwart" || cfg.StalwartAdminToken != "token" ||
+		cfg.OIDCIssuer != "https://mail.example.com" || cfg.OIDCClientID != "stalwart-users" ||
+		cfg.OIDCClientSecret != "client-secret" || cfg.OIDCRedirectURL != "https://users.example.com/api/auth/callback" {
 		t.Fatalf("cfg = %#v", cfg)
 	}
 }
@@ -144,7 +155,7 @@ func TestNewServerHandlerAuthorizesRoutes(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			token, err := tokens.GenerateToken(tt.username, tt.isAdmin)
+			token, _, err := tokens.GenerateToken(tt.username, tt.isAdmin)
 			if err != nil {
 				t.Fatalf("GenerateToken() error = %v", err)
 			}
@@ -230,7 +241,7 @@ func TestDomainAdminCannotUseMixedCaseNamesToBypassChecks(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewTokenManager() error = %v", err)
 	}
-	token, err := tokens.GenerateToken("dora@client.fi", false)
+	token, _, err := tokens.GenerateToken("dora@client.fi", false)
 	if err != nil {
 		t.Fatalf("GenerateToken() error = %v", err)
 	}
@@ -265,5 +276,172 @@ func TestDomainAdminCannotUseMixedCaseNamesToBypassChecks(t *testing.T) {
 				t.Fatalf("status = %d body = %s; want %d with %q", rr.Code, rr.Body.String(), tt.want, tt.error)
 			}
 		})
+	}
+}
+
+// fakeProvider is a Stalwart OIDC provider that signs in whoever email names.
+func fakeProvider(t *testing.T, email string) *httptest.Server {
+	t.Helper()
+	var srv *httptest.Server
+	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/.well-known/openid-configuration":
+			_ = json.NewEncoder(w).Encode(map[string]string{
+				"issuer":                 srv.URL,
+				"authorization_endpoint": srv.URL + "/login",
+				"token_endpoint":         srv.URL + "/auth/token",
+				"userinfo_endpoint":      srv.URL + "/auth/userinfo",
+			})
+		case "/auth/token":
+			_ = json.NewEncoder(w).Encode(map[string]any{"access_token": "at", "refresh_token": "rt", "expires_in": 3600})
+		case "/auth/userinfo":
+			_ = json.NewEncoder(w).Encode(map[string]string{"sub": "1", "email": email})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+func oidcTestConfig(issuer, prefix string) serverConfig {
+	return serverConfig{
+		JWTSecret:        serverTestJWTSecret,
+		PathPrefix:       prefix,
+		OIDCIssuer:       issuer,
+		OIDCClientID:     "stalwart-users",
+		OIDCClientSecret: "client-secret",
+		OIDCRedirectURL:  "https://users.example.com" + prefix + "/api/auth/callback",
+	}
+}
+
+// signIn runs the browser through GET /auth/login and the callback and
+// returns the callback response.
+func signIn(t *testing.T, handler http.Handler, prefix string) *httptest.ResponseRecorder {
+	t.Helper()
+
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, prefix+"/api/auth/login", nil))
+	if rr.Code != http.StatusFound {
+		t.Fatalf("login status = %d, want 302; body=%s", rr.Code, rr.Body.String())
+	}
+	loc, err := url.Parse(rr.Header().Get("Location"))
+	if err != nil {
+		t.Fatalf("login Location: %v", err)
+	}
+	req := httptest.NewRequest(http.MethodGet, prefix+"/api/auth/callback?"+url.Values{"code": {"c"}, "state": {loc.Query().Get("state")}}.Encode(), nil)
+	for _, c := range rr.Result().Cookies() {
+		req.AddCookie(c)
+	}
+	rr = httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+	return rr
+}
+
+func sessionCookie(rr *httptest.ResponseRecorder) *http.Cookie {
+	for _, c := range rr.Result().Cookies() {
+		if c.Name == "token" && c.Value != "" {
+			return c
+		}
+	}
+	return nil
+}
+
+func TestOIDCSignInResolvesOnlyPrimaryAddresses(t *testing.T) {
+	t.Parallel()
+
+	accounts := []stalwart.Account{
+		{ID: "d", Type: "User", Email: "dora@client.fi", IsAdmin: true, Aliases: map[string]stalwart.Alias{"0": {Name: "sales", DomainID: "c"}}},
+		{ID: "s", Type: "User", Email: "sam@client.fi"},
+		{ID: "g", Type: "Group", Email: "team@client.fi"},
+	}
+
+	tests := []struct {
+		email string
+		want  string
+	}{
+		{email: "Dora@Client.fi", want: "/"},
+		{email: "sales@client.fi", want: "/login?error=no_mailbox"},
+		{email: "team@client.fi", want: "/login?error=no_mailbox"},
+		{email: "ſam@client.fi", want: "/login?error=no_mailbox"},
+		{email: "", want: "/login?error=no_mailbox"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.email, func(t *testing.T) {
+			t.Parallel()
+
+			store := directory.New(accountsStalwart{accounts: accounts}, noAdminDomains{})
+			handler, err := newServerHandler(oidcTestConfig(fakeProvider(t, tt.email).URL, ""), nil, store)
+			if err != nil {
+				t.Fatalf("newServerHandler() error = %v", err)
+			}
+
+			rr := signIn(t, handler, "")
+
+			if rr.Code != http.StatusFound || rr.Header().Get("Location") != tt.want {
+				t.Fatalf("callback = %d %q, want 302 %q", rr.Code, rr.Header().Get("Location"), tt.want)
+			}
+			c := sessionCookie(rr)
+			if (c != nil) != (tt.want == "/") {
+				t.Fatalf("session cookie = %v, want one only on success", c)
+			}
+			if c == nil {
+				return
+			}
+
+			req := httptest.NewRequest(http.MethodGet, "/api/auth/me", nil)
+			req.AddCookie(c)
+			me := httptest.NewRecorder()
+			handler.ServeHTTP(me, req)
+			if !strings.Contains(me.Body.String(), `"username":"dora@client.fi"`) || !strings.Contains(me.Body.String(), `"isAdmin":true`) {
+				t.Fatalf("/auth/me = %s, want admin dora@client.fi", me.Body.String())
+			}
+		})
+	}
+}
+
+func TestOIDCRoutesRespectPathPrefix(t *testing.T) {
+	t.Parallel()
+
+	store := directory.New(accountsStalwart{accounts: []stalwart.Account{{ID: "d", Type: "User", Email: "dora@client.fi"}}}, noAdminDomains{})
+	handler, err := newServerHandler(oidcTestConfig(fakeProvider(t, "dora@client.fi").URL, "/users"), nil, store)
+	if err != nil {
+		t.Fatalf("newServerHandler() error = %v", err)
+	}
+
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/users/api/auth/login", nil))
+	var stateCookie *http.Cookie
+	for _, c := range rr.Result().Cookies() {
+		if c.Name == "su_oidc" {
+			stateCookie = c
+		}
+	}
+	if stateCookie == nil || stateCookie.Path != "/users/api/auth" {
+		t.Fatalf("state cookie = %#v, want Path=/users/api/auth", stateCookie)
+	}
+
+	rr = signIn(t, handler, "/users")
+	if rr.Header().Get("Location") != "/users/" || sessionCookie(rr) == nil {
+		t.Fatalf("callback Location = %q, want /users/ with a session", rr.Header().Get("Location"))
+	}
+
+	rr = httptest.NewRecorder()
+	handler.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/users/api/auth/callback?code=c&state=s", nil))
+	if rr.Header().Get("Location") != "/users/login?error=state" {
+		t.Fatalf("callback without cookie Location = %q, want /users/login?error=state", rr.Header().Get("Location"))
+	}
+}
+
+func TestBasicLoginRouteIsGone(t *testing.T) {
+	t.Parallel()
+
+	rr := httptest.NewRecorder()
+	newTestServerHandler(t).ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "/api/auth/login", strings.NewReader(`{"email":"a@b.c","password":"p"}`)))
+
+	if rr.Code != http.StatusUnauthorized || sessionCookie(rr) != nil {
+		t.Fatalf("POST /api/auth/login = %d, want 401 from the session middleware", rr.Code)
 	}
 }

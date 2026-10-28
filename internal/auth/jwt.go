@@ -2,6 +2,10 @@ package auth
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -29,8 +33,12 @@ var ErrMissingJWTSecret = errors.New("JWT_SECRET is required")
 type Session struct {
 	Username string `json:"username"`
 	IsAdmin  bool   `json:"isAdmin"`
+	// ID keys the session's OAuth tokens in the TokenStore; it stays
+	// server-side.
+	ID string `json:"-"`
 }
 
+// SessionClaims carries the session id as the JWT ID (jti).
 type SessionClaims struct {
 	IsAdmin bool `json:"isAdmin"`
 	jwt.RegisteredClaims
@@ -41,6 +49,12 @@ type TokenManager struct {
 	cookieName string
 	now        func() time.Time
 	secure     bool
+
+	// stateKey signs the su_oidc cookie; it is derived from secret so the raw
+	// JWT secret isn't reused for a second purpose.
+	stateKey []byte
+	// appRoot is PATH_PREFIX, authPath where the auth routes are mounted.
+	appRoot, authPath string
 }
 
 func NewTokenManager(secret string) (*TokenManager, error) {
@@ -56,22 +70,50 @@ func NewTokenManager(secret string) (*TokenManager, error) {
 		cookieName: tokenCookieName,
 		now:        time.Now,
 		secure:     true,
+		stateKey:   deriveKey([]byte(secret), stateKeyLabel),
+		authPath:   "/api/auth",
 	}, nil
 }
 
-func (m *TokenManager) GenerateToken(username string, isAdmin bool) (string, error) {
+func deriveKey(secret []byte, label string) []byte {
+	mac := hmac.New(sha256.New, secret)
+	mac.Write([]byte(label))
+	return mac.Sum(nil)
+}
+
+// SetPaths tells the manager where the app is mounted: appRoot is PATH_PREFIX
+// ("" at the host root) and apiBase the API mount below it ("/api"). Sign-in
+// redirects and the su_oidc cookie path are built from these, never from the
+// request.
+func (m *TokenManager) SetPaths(appRoot, apiBase string) {
+	m.appRoot = appRoot
+	m.authPath = appRoot + apiBase + "/auth"
+}
+
+// GenerateToken signs a session for username with a fresh random session id
+// and returns both.
+func (m *TokenManager) GenerateToken(username string, isAdmin bool) (token, sessionID string, err error) {
+	sessionID, err = randomToken()
+	if err != nil {
+		return "", "", err
+	}
+
 	now := m.now()
 	claims := SessionClaims{
 		IsAdmin: isAdmin,
 		RegisteredClaims: jwt.RegisteredClaims{
+			ID:        sessionID,
 			Subject:   username,
 			IssuedAt:  jwt.NewNumericDate(now),
 			ExpiresAt: jwt.NewNumericDate(now.Add(tokenTTL)),
 		},
 	}
 
-	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
-	return token.SignedString(m.secret)
+	token, err = jwt.NewWithClaims(jwt.SigningMethodHS256, claims).SignedString(m.secret)
+	if err != nil {
+		return "", "", err
+	}
+	return token, sessionID, nil
 }
 
 func (m *TokenManager) ParseToken(tokenString string) (*Session, error) {
@@ -96,6 +138,7 @@ func (m *TokenManager) ParseToken(tokenString string) (*Session, error) {
 	return &Session{
 		Username: claims.Subject,
 		IsAdmin:  claims.IsAdmin,
+		ID:       claims.ID,
 	}, nil
 }
 
@@ -171,4 +214,13 @@ func writeJSONHeader(w http.ResponseWriter) {
 func writeJSONError(w http.ResponseWriter, statusCode int, message string) {
 	w.WriteHeader(statusCode)
 	_ = json.NewEncoder(w).Encode(map[string]string{"error": message})
+}
+
+// randomToken returns 32 random bytes, base64url without padding.
+func randomToken() (string, error) {
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
+		return "", fmt.Errorf("random token: %w", err)
+	}
+	return base64.RawURLEncoding.EncodeToString(b), nil
 }

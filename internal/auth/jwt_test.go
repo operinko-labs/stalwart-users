@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -38,7 +39,7 @@ func TestTokenManagerGeneratesAndValidatesToken(t *testing.T) {
 	now := time.Date(2026, 5, 13, 12, 0, 0, 0, time.UTC)
 	m.now = func() time.Time { return now }
 
-	token, err := m.GenerateToken("alice@example.com", true)
+	token, _, err := m.GenerateToken("alice@example.com", true)
 	if err != nil {
 		t.Fatalf("GenerateToken() error = %v", err)
 	}
@@ -64,7 +65,7 @@ func TestTokenManagerRejectsExpiredToken(t *testing.T) {
 	now := time.Date(2026, 5, 13, 12, 0, 0, 0, time.UTC)
 	m.now = func() time.Time { return now }
 
-	token, err := m.GenerateToken("alice@example.com", false)
+	token, _, err := m.GenerateToken("alice@example.com", false)
 	if err != nil {
 		t.Fatalf("GenerateToken() error = %v", err)
 	}
@@ -121,7 +122,7 @@ func TestTokenMiddlewareSetsContextForValidSession(t *testing.T) {
 		t.Fatalf("NewTokenManager() error = %v", err)
 	}
 
-	token, err := m.GenerateToken("alice@example.com", true)
+	token, _, err := m.GenerateToken("alice@example.com", true)
 	if err != nil {
 		t.Fatalf("GenerateToken() error = %v", err)
 	}
@@ -171,5 +172,36 @@ func TestTokenMiddlewareRejectsMissingCookie(t *testing.T) {
 
 	if rr.Code != http.StatusUnauthorized {
 		t.Fatalf("status code = %d, want %d", rr.Code, http.StatusUnauthorized)
+	}
+}
+
+func TestGenerateTokenCarriesAFreshSessionID(t *testing.T) {
+	t.Parallel()
+
+	m, err := NewTokenManager(testJWTSecret)
+	if err != nil {
+		t.Fatalf("NewTokenManager() error = %v", err)
+	}
+
+	token, id, err := m.GenerateToken("alice@example.com", false)
+	if err != nil {
+		t.Fatalf("GenerateToken() error = %v", err)
+	}
+	if raw, err := base64.RawURLEncoding.DecodeString(id); err != nil || len(raw) != 32 {
+		t.Fatalf("session id %q is not 32 base64url bytes", id)
+	}
+	session, err := m.ParseToken(token)
+	if err != nil || session.ID != id {
+		t.Fatalf("ParseToken() = %#v, %v; want session id %q", session, err, id)
+	}
+
+	_, other, err := m.GenerateToken("alice@example.com", false)
+	if err != nil || other == id {
+		t.Fatalf("second GenerateToken() id = %q, %v; want a different id", other, err)
+	}
+
+	body, _ := json.Marshal(session)
+	if strings.Contains(string(body), id) {
+		t.Fatalf("Session JSON %s exposes the session id", body)
 	}
 }

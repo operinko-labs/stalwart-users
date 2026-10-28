@@ -1,5 +1,22 @@
 const API_BASE = import.meta.env.VITE_API_BASE || '/api'
 
+// An API error that keeps the HTTP status and the server's error string, so callers
+// can tell e.g. 401 reauth_required from 401 invalid current password.
+export class ApiError extends Error {
+  status: number
+  code: string
+
+  constructor(status: number, code: string) {
+    super(code)
+    this.name = 'ApiError'
+    this.status = status
+    this.code = code
+  }
+}
+
+// Sign-in is a full-page navigation to the backend, which redirects to Stalwart's login page.
+export const loginUrl = `${API_BASE}/auth/login`
+
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
   const response = await fetch(`${API_BASE}${path}`, {
     ...options,
@@ -12,7 +29,7 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
 
   if (!response.ok) {
     const error = await response.json().catch(() => ({ error: response.statusText }))
-    throw new Error(error.error || response.statusText)
+    throw new ApiError(response.status, error.error || response.statusText)
   }
 
   if (response.status === 204) {
@@ -57,11 +74,6 @@ export type Account = {
 
 export const api = {
   auth: {
-    login: (email: string, password: string) =>
-      request<AuthUser>('/auth/login', {
-        method: 'POST',
-        body: JSON.stringify({ email, password }),
-      }),
     me: () => request<AuthUser>('/auth/me'),
     logout: () => request<void>('/auth/logout', { method: 'POST' }),
   },
@@ -76,12 +88,13 @@ export const api = {
         body: JSON.stringify(data),
       }),
     delete: (name: string) => request<void>(`/accounts/${encodeURIComponent(name)}`, { method: 'DELETE' }),
-    changePassword: (name: string, newPassword: string, currentPassword?: string) =>
+    changePassword: (name: string, newPassword: string, currentPassword?: string, otpCode?: string) =>
       request<{ message: string }>(`/accounts/${encodeURIComponent(name)}/password`, {
         method: 'PUT',
         body: JSON.stringify({
           ...(currentPassword ? { current_password: currentPassword } : {}),
           new_password: newPassword,
+          ...(otpCode ? { otp_code: otpCode } : {}),
         }),
       }),
     adminDomains: async (name: string) => {

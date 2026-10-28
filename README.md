@@ -9,8 +9,8 @@ This project provides a management interface for Stalwart 1.0's internal directo
 ## Architecture
 
 - **Backend**: Go service listening on port 3000.
-- **Authentication**: Checks the login email and password against Stalwart's `/jmap/session` endpoint with HTTP Basic auth, then issues the app's own JWT session cookie. Accounts with two-factor auth can't sign in this way.
-- **Account management**: Calls Stalwart's JMAP admin API (`x:Account`, `x:Domain`) with `STALWART_ADMIN_TOKEN`. New and changed passwords go to Stalwart as plaintext, so Stalwart's password policy applies and its rejections come back as 400. Stalwart 1.0 accounts can't be disabled, and groups are created in Stalwart's admin UI, not here.
+- **Authentication**: Users sign in through Stalwart's OIDC login (authorization code flow with PKCE, scope `openid offline_access`), so Stalwart's own login page handles passwords and two-factor auth. The app is a first-party OAuth client of Stalwart. `GET /auth/login` redirects the browser to Stalwart, `GET /auth/callback` exchanges the code, takes the userinfo `email` and requires it to match the primary address of a Stalwart User, then issues the app's own JWT session cookie and redirects to `/`. A failed sign-in lands on `/login?error=<denied|state|signin|no_mailbox>`. The user's OAuth tokens are kept in memory only (never in a cookie), so after a backend restart a session still works except for changing your own password, which asks the user to sign in again. Signing out ends the app's session only, not the Stalwart login.
+- **Account management**: Calls Stalwart's JMAP admin API (`x:Account`, `x:Domain`) with `STALWART_ADMIN_TOKEN`. New and changed passwords go to Stalwart as plaintext, so Stalwart's password policy applies and its rejections come back as 400. Non-admins and domain admins changing their own password go through Stalwart's `x:AccountPassword` as themselves, using their own access token, so Stalwart checks the current password and the two-factor code (answered as 400 `otp_required`; 401 `reauth_required` when the stored tokens are gone). Full admins changing their own password use the admin API without a current password. Stalwart 1.0 accounts can't be disabled, and groups are created in Stalwart's admin UI, not here.
 - **Authorization**: Three roles.
   - **Full admins** (accounts with Stalwart's Admin role) can do everything.
   - **Domain admins** manage the accounts on the domains assigned to them in `directory.domain_admins` (created by the app on startup; full admins edit it via `/accounts/{name}/admin-domains`). They can create, edit, delete and reset passwords for those accounts, and manage their addresses and groups on those domains. They cannot set quotas, touch full admins, grant any admin rights, or act on a peer domain admin who manages a domain they don't.
@@ -34,7 +34,11 @@ This project provides a management interface for Stalwart 1.0's internal directo
 | DELETE | `/accounts/{name}` | Delete an account (cascades to aliases and groups) |
 | DELETE | `/accounts/{name}/emails/{address}` | Remove an email alias |
 | DELETE | `/accounts/{name}/groups/{group}` | Remove an account from a group |
-| PUT | `/accounts/{name}/password` | Change a password (own password needs `current_password`) |
+| GET | `/auth/login` | Start sign-in: redirects to Stalwart's login page |
+| GET | `/auth/callback` | OIDC callback: sets the session cookie, redirects to `/` |
+| GET | `/auth/me` | The signed-in user |
+| POST | `/auth/logout` | End the app's session |
+| PUT | `/accounts/{name}/password` | Change a password (own password needs `current_password`, plus `otp_code` when 2FA is on) |
 | GET | `/accounts/{name}/admin-domains` | List the domains an account administers (full admins only) |
 | PUT | `/accounts/{name}/admin-domains` | Replace the domains an account administers (full admins only) |
 
@@ -42,7 +46,11 @@ This project provides a management interface for Stalwart 1.0's internal directo
 
 | Name | Description | Default | Required |
 |---|---|---|---|
-| `STALWART_URL` | Stalwart server URL, for login checks and the JMAP admin API | | Yes |
+| `STALWART_URL` | Stalwart server URL, for the JMAP admin API and `x:AccountPassword` | | Yes |
+| `OIDC_ISSUER` | Stalwart's OIDC issuer URL (discovery at `<issuer>/.well-known/openid-configuration`), e.g. `https://mail.erinko.fi` | | Yes |
+| `OIDC_CLIENT_ID` | Client ID of the OAuth client registered in Stalwart for this app | | Yes |
+| `OIDC_CLIENT_SECRET` | Client secret of that OAuth client (used with `client_secret_basic`) | | Yes |
+| `OIDC_REDIRECT_URL` | Callback URL registered on that client: `https://<host>/api/auth/callback` | | Yes |
 | `STALWART_ADMIN_TOKEN` | Bearer token for Stalwart's JMAP admin API | | Yes |
 | `DATABASE_URL` | PostgreSQL connection string for the `directory.domain_admins` table only | | Yes |
 | `JWT_SECRET` | Secret that signs session cookies | | Yes |

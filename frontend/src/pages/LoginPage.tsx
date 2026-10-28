@@ -1,15 +1,19 @@
-import { useState } from 'react'
-import { Navigate, useNavigate } from 'react-router-dom'
+import { Navigate, useSearchParams } from 'react-router-dom'
 import { useAuth } from '../contexts/useAuth'
 
+const ERROR_MESSAGES: Record<string, string> = {
+  denied: 'Sign-in was cancelled.',
+  state: 'Sign-in expired, please try again.',
+  signin: 'Sign-in failed, please try again.',
+  no_mailbox: 'This account has no mailbox here.',
+}
+
 export default function LoginPage() {
-  const { isLoading, user, login } = useAuth()
-  const navigate = useNavigate()
-  
-  const [email, setEmail] = useState('')
-  const [password, setPassword] = useState('')
-  const [error, setError] = useState('')
-  const [isSubmitting, setIsSubmitting] = useState(false)
+  const { isLoading, user, startLogin } = useAuth()
+  const [searchParams] = useSearchParams()
+  const errorCode = searchParams.get('error')
+  // An unknown code gets the generic message.
+  const error = errorCode ? (ERROR_MESSAGES[errorCode] ?? ERROR_MESSAGES.signin) : ''
 
   if (isLoading) {
     return <div className="page-status">Loading…</div>
@@ -17,21 +21,6 @@ export default function LoginPage() {
 
   if (user) {
     return <Navigate to="/" replace />
-  }
-
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault()
-    setError('')
-    setIsSubmitting(true)
-
-    try {
-      await login(email, password)
-      navigate('/', { replace: true })
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to login')
-    } finally {
-      setIsSubmitting(false)
-    }
   }
 
   return (
@@ -43,44 +32,9 @@ export default function LoginPage() {
 
       {error && <div className="error-banner">{error}</div>}
 
-      <form onSubmit={handleSubmit}>
-        <div className="form-group">
-          <label htmlFor="email" className="form-label">Username or email</label>
-          <input
-            id="email"
-            type="text"
-            className="form-input"
-            value={email}
-            onChange={(e) => setEmail(e.target.value)}
-            required
-            disabled={isSubmitting}
-            autoComplete="username"
-            autoFocus
-          />
-        </div>
-
-        <div className="form-group">
-          <label htmlFor="password" className="form-label">Password</label>
-          <input
-            id="password"
-            type="password"
-            className="form-input"
-            value={password}
-            onChange={(e) => setPassword(e.target.value)}
-            required
-            disabled={isSubmitting}
-            autoComplete="current-password"
-          />
-        </div>
-
-        <button 
-          type="submit" 
-          className="btn-primary" 
-          disabled={isSubmitting || !email || !password}
-        >
-          {isSubmitting ? 'Signing in...' : 'Sign In'}
-        </button>
-      </form>
+      <button type="button" className="btn-primary" onClick={startLogin}>
+        Sign in
+      </button>
     </main>
   )
 }

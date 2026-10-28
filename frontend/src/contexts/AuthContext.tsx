@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react'
-import { api, type AuthUser } from '../api/client'
+import { api, loginUrl, type AuthUser } from '../api/client'
 import { AuthContext } from './auth-context'
 
 export function AuthProvider({ children }: { children: ReactNode }) {
@@ -33,10 +33,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     }
   }, [])
 
-  const login = useCallback(async (email: string, password: string) => {
-    await api.auth.login(email, password)
-    // The login response has no admin domains; /auth/me does.
-    setUser(await api.auth.me())
+  const startLogin = useCallback(() => {
+    window.location.assign(loginUrl)
   }, [])
 
   const logout = useCallback(async () => {
@@ -48,8 +46,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, [])
 
   const value = useMemo(
-    () => ({ user, isLoading, login, logout }),
-    [isLoading, login, logout, user],
+    () => ({ user, isLoading, startLogin, logout }),
+    [isLoading, startLogin, logout, user],
   )
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>

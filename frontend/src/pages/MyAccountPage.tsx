@@ -1,9 +1,11 @@
 import { useEffect, useState } from 'react'
-import { api, managesDomain, type Account } from '../api/client'
+import { useNavigate } from 'react-router-dom'
+import { api, ApiError, managesDomain, type Account } from '../api/client'
 import { useAuth } from '../contexts/useAuth'
 
 export default function MyAccountPage() {
-  const { user } = useAuth()
+  const { user, logout } = useAuth()
+  const navigate = useNavigate()
   const [account, setAccount] = useState<Account | null>(null)
   const [aliases, setAliases] = useState<string[]>([])
   const [isLoading, setIsLoading] = useState(true)
@@ -13,6 +15,8 @@ export default function MyAccountPage() {
   const [currentPassword, setCurrentPassword] = useState('')
   const [newPassword, setNewPassword] = useState('')
   const [confirmPassword, setConfirmPassword] = useState('')
+  const [otpCode, setOtpCode] = useState('')
+  const [otpRequired, setOtpRequired] = useState(false)
   const [isChangingPassword, setIsChangingPassword] = useState(false)
   const [passwordError, setPasswordError] = useState('')
   const [passwordSuccess, setPasswordSuccess] = useState('')
@@ -81,13 +85,31 @@ export default function MyAccountPage() {
 
     setIsChangingPassword(true)
     try {
-      await api.accounts.changePassword(user.username, newPassword, currentPassword)
+      await api.accounts.changePassword(user.username, newPassword, currentPassword, otpCode.trim())
       setPasswordSuccess('Password changed successfully')
       setCurrentPassword('')
       setNewPassword('')
       setConfirmPassword('')
+      setOtpCode('')
+      setOtpRequired(false)
     } catch (err: unknown) {
-      setPasswordError((err as Error).message || 'Failed to change password')
+      if (err instanceof ApiError && err.status === 401 && err.code === 'reauth_required') {
+        // The session's Stalwart tokens are gone. End the session so /login shows the
+        // sign-in button instead of bouncing a signed-in user back to the app.
+        try {
+          await logout()
+        } catch {
+          // The session is dropped locally either way.
+        }
+        navigate('/login', { replace: true })
+        return
+      }
+      if (err instanceof ApiError && err.status === 400 && err.code === 'otp_required') {
+        setOtpRequired(true)
+        setPasswordError('Enter your two-factor code to change the password.')
+      } else {
+        setPasswordError((err as Error).message || 'Failed to change password')
+      }
     } finally {
       setIsChangingPassword(false)
     }
@@ -276,10 +298,27 @@ export default function MyAccountPage() {
               disabled={isChangingPassword}
             />
           </div>
+          {otpRequired && (
+            <div className="form-group">
+              <label className="form-label" htmlFor="otpCode">Two-factor code</label>
+              <input
+                id="otpCode"
+                type="text"
+                inputMode="numeric"
+                className="form-input"
+                value={otpCode}
+                onChange={(e) => setOtpCode(e.target.value)}
+                required
+                disabled={isChangingPassword}
+                autoComplete="one-time-code"
+                autoFocus
+              />
+            </div>
+          )}
           <button
             type="submit"
             className="btn-primary"
-            disabled={isChangingPassword || !currentPassword || !newPassword || !confirmPassword}
+            disabled={isChangingPassword || !currentPassword || !newPassword || !confirmPassword || (otpRequired && !otpCode.trim())}
             style={{ marginTop: '1rem' }}
           >
             {isChangingPassword ? 'Changing Password...' : 'Change Password'}

@@ -16,12 +16,12 @@ import (
 	"github.com/operinko-labs/stalwart-users/internal/stalwart"
 )
 
-const minHashBytes = 65
-
-var (
-	hashPrefix = "{ssha512}"
-	hashBody   = regexp.MustCompile(`^[A-Za-z0-9+/]+={0,2}$`)
+const (
+	minHashBytes = 65
+	hashPrefix   = "{ssha512}"
 )
+
+var hashBody = regexp.MustCompile(`^[A-Za-z0-9+/]+={0,2}$`)
 
 type sqlAccount struct {
 	Name, Secret, Description string
@@ -43,13 +43,15 @@ type writer interface {
 	SetPassword(ctx context.Context, account stalwart.Account, secret string) error
 }
 
-// loadSQL reads the active accounts and their non-primary addresses.
+// loadSQL reads the active accounts and their 'alias' addresses. An address
+// row whose type is neither 'primary' nor 'alias' (for example a mailing list)
+// is an error: it must not be imported as a personal alias.
 func loadSQL(db *sql.DB) ([]sqlAccount, error) {
 	rows, err := db.Query(`
 		SELECT a.name, COALESCE(a.secret, ''), COALESCE(a.description, ''),
-		       COALESCE(a.quota, 0), COALESCE(a.is_admin, false), e.address
+		       COALESCE(a.quota, 0), COALESCE(a.is_admin, false), e.address, e.type
 		FROM directory.accounts a
-		LEFT JOIN directory.emails e ON e.name = a.name AND e.type <> 'primary'
+		LEFT JOIN directory.emails e ON e.name = a.name
 		WHERE a.active = true
 		ORDER BY a.name, e.address`)
 	if err != nil {
@@ -60,22 +62,28 @@ func loadSQL(db *sql.DB) ([]sqlAccount, error) {
 	var accounts []sqlAccount
 	for rows.Next() {
 		var (
-			account sqlAccount
-			address sql.NullString
+			account      sqlAccount
+			address, typ sql.NullString
 		)
-		if err := rows.Scan(&account.Name, &account.Secret, &account.Description, &account.Quota, &account.IsAdmin, &address); err != nil {
+		if err := rows.Scan(&account.Name, &account.Secret, &account.Description, &account.Quota, &account.IsAdmin, &address, &typ); err != nil {
 			return nil, fmt.Errorf("scan directory account: %w", err)
 		}
-		if n := len(accounts); n > 0 && accounts[n-1].Name == account.Name {
-			if address.Valid {
-				accounts[n-1].Aliases = append(accounts[n-1].Aliases, address.String)
-			}
+
+		if n := len(accounts); n == 0 || accounts[n-1].Name != account.Name {
+			accounts = append(accounts, account)
+		}
+		current := &accounts[len(accounts)-1]
+
+		if !address.Valid {
 			continue
 		}
-		if address.Valid {
-			account.Aliases = []string{address.String}
+		switch typ.String {
+		case "primary":
+		case "alias":
+			current.Aliases = append(current.Aliases, address.String)
+		default:
+			return nil, fmt.Errorf("%s: address %s has type %q; only 'primary' and 'alias' can be migrated", account.Name, address.String, typ.String)
 		}
-		accounts = append(accounts, account)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("read directory accounts: %w", err)
@@ -95,7 +103,7 @@ func validHash(secret string) bool {
 	if !hashBody.MatchString(body) {
 		return false
 	}
-	decoded, err := base64.StdEncoding.DecodeString(body)
+	decoded, err := base64.StdEncoding.Strict().DecodeString(body)
 
 	return err == nil && len(decoded) >= minHashBytes
 }
@@ -119,12 +127,32 @@ func plan(sqlAccts []sqlAccount, accts []stalwart.Account, domains []stalwart.Do
 		domainNames[domain.ID] = auth.CanonicalName(domain.Name)
 	}
 
+	// owners maps every address and alias Stalwart knows, on Users and Groups
+	// alike, to the account that holds it.
+	owners := make(map[string]string, len(accts))
+	for _, account := range accts {
+		owners[auth.CanonicalName(account.Email)] = account.ID
+		for _, alias := range account.Aliases {
+			if domain, ok := domainNames[alias.DomainID]; ok {
+				owners[auth.CanonicalName(alias.Name)+"@"+domain] = account.ID
+			}
+		}
+	}
+
 	var (
-		changes []change
-		errs    []error
+		changes      []change
+		errs         []error
+		seenAccounts = map[string]bool{}
+		sqlAliases   = map[string]string{} // alias -> SQL account that lists it
 	)
 	for _, source := range sqlAccts {
 		address := auth.CanonicalName(source.Name)
+
+		if seenAccounts[address] {
+			errs = append(errs, fmt.Errorf("%s: listed more than once in the SQL directory", address))
+			continue
+		}
+		seenAccounts[address] = true
 
 		if !validHash(source.Secret) {
 			errs = append(errs, fmt.Errorf("%s: secret is not a valid {SSHA512} hash", address))
@@ -140,6 +168,16 @@ func plan(sqlAccts []sqlAccount, accts []stalwart.Account, domains []stalwart.Do
 		if err != nil {
 			errs = append(errs, err)
 			continue
+		}
+		for _, raw := range source.Aliases {
+			full := auth.CanonicalName(raw)
+			if owner, ok := owners[full]; ok && owner != account.ID {
+				errs = append(errs, fmt.Errorf("%s: alias %s already belongs to another Stalwart account", address, full))
+			}
+			if other, ok := sqlAliases[full]; ok && other != address {
+				errs = append(errs, fmt.Errorf("%s: alias %s is also listed on %s", address, full, other))
+			}
+			sqlAliases[full] = address
 		}
 		changes = append(changes, change{
 			Address: address, AccountID: account.ID, Patch: patch, Secret: source.Secret, Account: account,

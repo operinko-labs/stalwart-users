@@ -43,6 +43,10 @@ func TestValidHash(t *testing.T) {
 		}
 	}
 
+	// Non-zero trailing pad bits decode in lax mode but are not canonical base64.
+	padBits := hashOf("{SSHA512}", 71)
+	padBits = padBits[:len(padBits)-2] + "B="
+
 	urlSafe := "{SSHA512}" + strings.NewReplacer("+", "-", "/", "_").Replace(base64.StdEncoding.EncodeToString([]byte(strings.Repeat("\xfb\xff", 40))))
 	invalid := map[string]string{
 		"url-safe body":    urlSafe,
@@ -53,6 +57,7 @@ func TestValidHash(t *testing.T) {
 		"ssha512 no body":  "{SSHA512}",
 		"wrong scheme":     hashOf("{SSHA}", 68),
 		"too short":        hashOf("{SSHA512}", 64),
+		"pad bits":         padBits,
 		"empty":            "",
 		"plaintext":        "hunter2hunter2",
 	}
@@ -72,11 +77,13 @@ func TestLoadSQL(t *testing.T) {
 	}
 	defer db.Close()
 
-	mock.ExpectQuery(`FROM directory\.accounts`).WillReturnRows(
-		sqlmock.NewRows([]string{"name", "secret", "description", "quota", "is_admin", "address"}).
-			AddRow("admin@vaderrp.com", "s1", "Admin", 0, true, "root@vaderrp.com").
-			AddRow("admin@vaderrp.com", "s1", "Admin", 0, true, "hostmaster@vaderrp.com").
-			AddRow("olli@erinko.fi", "s2", "", 1024, false, nil),
+	mock.ExpectQuery(loadSQLQuery).WillReturnRows(
+		sqlmock.NewRows([]string{"name", "secret", "description", "quota", "is_admin", "address", "type"}).
+			AddRow("admin@vaderrp.com", "s1", "Admin", 0, true, "admin@vaderrp.com", "primary").
+			AddRow("admin@vaderrp.com", "s1", "Admin", 0, true, "hostmaster@vaderrp.com", "alias").
+			AddRow("admin@vaderrp.com", "s1", "Admin", 0, true, "root@vaderrp.com", "alias").
+			AddRow("olli@erinko.fi", "s2", "", 1024, false, "olli@erinko.fi", "primary").
+			AddRow("solo@erinko.fi", "s3", "", 0, false, nil, nil),
 	)
 
 	got, err := loadSQL(db)
@@ -85,14 +92,40 @@ func TestLoadSQL(t *testing.T) {
 	}
 
 	want := []sqlAccount{
-		{Name: "admin@vaderrp.com", Secret: "s1", Description: "Admin", IsAdmin: true, Aliases: []string{"root@vaderrp.com", "hostmaster@vaderrp.com"}},
+		{Name: "admin@vaderrp.com", Secret: "s1", Description: "Admin", IsAdmin: true, Aliases: []string{"hostmaster@vaderrp.com", "root@vaderrp.com"}},
 		{Name: "olli@erinko.fi", Secret: "s2", Quota: 1024},
+		{Name: "solo@erinko.fi", Secret: "s3"},
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("loadSQL() = %+v, want %+v", got, want)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatalf("expectations: %v", err)
+	}
+}
+
+// loadSQLQuery pins the active filter and the join on every address row (the
+// type is decided in Go, so a 'list' row can't slip in as an alias).
+const loadSQLQuery = `(?s)e\.type\s+FROM directory\.accounts a\s+LEFT JOIN directory\.emails e ON e\.name = a\.name\s+WHERE a\.active = true`
+
+func TestLoadSQLRejectsUnknownAddressType(t *testing.T) {
+	t.Parallel()
+
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New() error = %v", err)
+	}
+	defer db.Close()
+
+	mock.ExpectQuery(loadSQLQuery).WillReturnRows(
+		sqlmock.NewRows([]string{"name", "secret", "description", "quota", "is_admin", "address", "type"}).
+			AddRow("a@vaderrp.com", "s1", "", 0, false, "a@vaderrp.com", "primary").
+			AddRow("a@vaderrp.com", "s1", "", 0, false, "team@vaderrp.com", "list"),
+	)
+
+	_, err = loadSQL(db)
+	if err == nil || !strings.Contains(err.Error(), "a@vaderrp.com") || !strings.Contains(err.Error(), "team@vaderrp.com") {
+		t.Fatalf("loadSQL() error = %v, want it to name the account and the list address", err)
 	}
 }
 
@@ -105,7 +138,7 @@ func TestLoadSQLQueryError(t *testing.T) {
 	}
 	defer db.Close()
 
-	mock.ExpectQuery(`FROM directory\.accounts`).WillReturnError(errors.New("boom"))
+	mock.ExpectQuery(loadSQLQuery).WillReturnError(errors.New("boom"))
 	if _, err := loadSQL(db); err == nil {
 		t.Fatal("loadSQL() error = nil, want error")
 	}
@@ -147,7 +180,7 @@ func TestPlanAdminAndAliases(t *testing.T) {
 	got := changes[0]
 
 	if got.Address != "admin@vaderrp.com" || got.AccountID != "a1" || got.Secret != goodHash() {
-		t.Errorf("change header = %q %q, want admin@vaderrp.com a1", got.Address, got.AccountID)
+		t.Errorf("change header = %q %q (secret match %t), want admin@vaderrp.com a1 and the SQL secret verbatim", got.Address, got.AccountID, got.Secret == goodHash())
 	}
 
 	want := map[string]any{
@@ -395,15 +428,18 @@ func TestOnlyLimitsPlanAndApply(t *testing.T) {
 	var out bytes.Buffer
 	err := run(context.Background(), &out, []sqlAccount{
 		{Name: "a@vaderrp.com", Secret: goodHash()},
-		{Name: "b@vaderrp.com", Secret: "garbage"}, // excluded, so its bad hash is not examined
+		{Name: "b@vaderrp.com", Secret: "garbage"},
 	}, fake.list(), testDomains, fake, true, []string{" B@vaderrp.com"})
 	if err == nil {
-		t.Fatal("run() with --only b and a bad hash: want error")
+		t.Fatal("run() with --only b, whose hash is bad: want error")
+	}
+	if fake.writes() != 0 {
+		t.Fatalf("writes = %d, want 0 after the aborted run", fake.writes())
 	}
 
 	err = run(context.Background(), &out, []sqlAccount{
 		{Name: "a@vaderrp.com", Secret: goodHash()},
-		{Name: "b@vaderrp.com", Secret: "garbage"},
+		{Name: "b@vaderrp.com", Secret: "garbage"}, // outside --only, so its bad hash is never examined
 	}, fake.list(), testDomains, fake, true, []string{"A@vaderrp.com"})
 	if err != nil {
 		t.Fatalf("run() error = %v", err)
@@ -505,4 +541,71 @@ func (f *fakeStalwart) SetPassword(_ context.Context, account stalwart.Account, 
 	}
 	f.passwords[account.ID] = secret
 	return nil
+}
+
+func TestPlanAliasOwnedByAnotherStalwartAccount(t *testing.T) {
+	t.Parallel()
+
+	a := stalwartUser("a1", "a@vaderrp.com")
+	b := stalwartUser("a2", "b@vaderrp.com")
+	b.Aliases = map[string]stalwart.Alias{"0": {Name: "shared", DomainID: "d1"}}
+	group := stalwartUser("g1", "team@vaderrp.com")
+	group.Type = "Group"
+
+	for name, alias := range map[string]string{
+		"another user's alias":   "Shared@vaderrp.com",
+		"another user's address": "b@vaderrp.com",
+		"a group's address":      "team@vaderrp.com",
+	} {
+		_, err := plan(
+			[]sqlAccount{{Name: "a@vaderrp.com", Secret: goodHash(), Aliases: []string{alias}}},
+			[]stalwart.Account{a, b, group}, testDomains)
+		if err == nil || !strings.Contains(err.Error(), "a@vaderrp.com") || !strings.Contains(err.Error(), strings.ToLower(alias)) {
+			t.Errorf("%s: plan() error = %v, want it to name the account and alias", name, err)
+		}
+	}
+}
+
+func TestPlanAliasOnTwoSQLAccounts(t *testing.T) {
+	t.Parallel()
+
+	fake := newFakeStalwart(stalwartUser("a1", "a@vaderrp.com"), stalwartUser("a2", "b@vaderrp.com"))
+	err := run(context.Background(), &bytes.Buffer{}, []sqlAccount{
+		{Name: "a@vaderrp.com", Secret: goodHash(), Aliases: []string{"x@vaderrp.com"}},
+		{Name: "b@vaderrp.com", Secret: goodHash(), Aliases: []string{"X@vaderrp.com"}},
+	}, fake.list(), testDomains, fake, true, nil)
+	if err == nil || !strings.Contains(err.Error(), "x@vaderrp.com") {
+		t.Fatalf("run() error = %v, want duplicate-alias error", err)
+	}
+	if fake.writes() != 0 {
+		t.Fatalf("writes = %d, want 0", fake.writes())
+	}
+}
+
+func TestPlanAliasAlreadyOnOwnAccountIsFine(t *testing.T) {
+	t.Parallel()
+
+	a := stalwartUser("a1", "a@vaderrp.com")
+	a.Aliases = map[string]stalwart.Alias{"0": {Name: "x", DomainID: "d1"}}
+	changes, err := plan(
+		[]sqlAccount{{Name: "a@vaderrp.com", Secret: goodHash(), Aliases: []string{"x@vaderrp.com"}}},
+		[]stalwart.Account{a}, testDomains)
+	if err != nil {
+		t.Fatalf("plan() error = %v", err)
+	}
+	if len(changes[0].Patch) != 0 {
+		t.Fatalf("Patch = %#v, want empty", changes[0].Patch)
+	}
+}
+
+func TestPlanDuplicateCanonicalSQLName(t *testing.T) {
+	t.Parallel()
+
+	_, err := plan([]sqlAccount{
+		{Name: "a@vaderrp.com", Secret: goodHash()},
+		{Name: " A@Vaderrp.com", Secret: goodHash()},
+	}, []stalwart.Account{stalwartUser("a1", "a@vaderrp.com")}, testDomains)
+	if err == nil || !strings.Contains(err.Error(), "a@vaderrp.com") {
+		t.Fatalf("plan() error = %v, want duplicate-name error", err)
+	}
 }

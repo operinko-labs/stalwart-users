@@ -76,6 +76,21 @@ make run
 make test
 ```
 
+## Migrating from the SQL directory
+
+The image also ships `/migrate-directory`, a one-shot tool that copies the old SQL directory (`directory.accounts`, `directory.emails`) into Stalwart's internal accounts. The accounts must already exist in Stalwart, one per active SQL account. It needs `DATABASE_URL` (the database with the old `directory` schema), `STALWART_URL` and `STALWART_ADMIN_TOKEN`.
+
+```bash
+/migrate-directory                          # dry run: prints what would change
+/migrate-directory --apply                  # writes
+/migrate-directory --apply --only a@x.com   # limit to these accounts (repeatable)
+```
+
+- Password hashes are copied byte for byte. A secret that isn't a valid `{SSHA512}` hash stops the run before anything is written, naming the account.
+- The tool only adds. It sets the description when SQL has one, grants the Admin role when SQL says admin, sets the disk quota when SQL has one, and adds aliases Stalwart lacks. It never lowers a role or removes an alias.
+- `--apply` writes every secret again, because Stalwart doesn't return them. A line reading `unchanged` means no other field differs.
+- It aborts before writing if an SQL account has no matching Stalwart User or an alias is on a domain Stalwart doesn't host.
+
 ## Deployment
 
 - **Container Image**: `harbor.vaderrp.com/operinko-labs/stalwart-users`

@@ -31,7 +31,6 @@ type jmapClient interface {
 	UpdateAccount(ctx context.Context, id string, patch map[string]any) error
 	DeleteAccount(ctx context.Context, name string) error
 	ListDomains(ctx context.Context) ([]stalwart.Domain, error)
-	Authenticate(ctx context.Context, username, password string) (bool, error)
 	SetPassword(ctx context.Context, account stalwart.Account, secret string) error
 }
 
@@ -174,16 +173,6 @@ func (s *Store) IsAdmin(name string) (bool, error) {
 	}
 
 	return account.IsAdmin, nil
-}
-
-// Authenticate checks the credentials against Stalwart.
-func (s *Store) Authenticate(ctx context.Context, name, password string) (bool, error) {
-	name = auth.CanonicalName(name)
-
-	ctx, cancel := context.WithTimeout(ctx, callTimeout)
-	defer cancel()
-
-	return s.client.Authenticate(ctx, name, password)
 }
 
 // SetPassword sends the new plaintext password to Stalwart, which hashes it and

@@ -122,7 +122,7 @@ func TestTokenMiddlewareSetsContextForValidSession(t *testing.T) {
 		t.Fatalf("NewTokenManager() error = %v", err)
 	}
 
-	token, _, err := m.GenerateToken("alice@example.com", true)
+	token, sessionID, err := m.GenerateToken("alice@example.com", true)
 	if err != nil {
 		t.Fatalf("GenerateToken() error = %v", err)
 	}
@@ -130,8 +130,9 @@ func TestTokenMiddlewareSetsContextForValidSession(t *testing.T) {
 	handler := m.Middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		writeJSONHeader(w)
 		_ = json.NewEncoder(w).Encode(map[string]any{
-			"username": UsernameFromContext(r.Context()),
-			"isAdmin":  IsAdminFromContext(r.Context()),
+			"username":  UsernameFromContext(r.Context()),
+			"isAdmin":   IsAdminFromContext(r.Context()),
+			"sessionID": SessionIDFromContext(r.Context()),
 		})
 	}))
 
@@ -150,8 +151,8 @@ func TestTokenMiddlewareSetsContextForValidSession(t *testing.T) {
 		t.Fatalf("json.Unmarshal() error = %v", err)
 	}
 
-	if body["username"] != "alice@example.com" || body["isAdmin"] != true {
-		t.Fatalf("body = %#v, want username/isAdmin from context", body)
+	if body["username"] != "alice@example.com" || body["isAdmin"] != true || body["sessionID"] != sessionID {
+		t.Fatalf("body = %#v, want username/isAdmin/sessionID from context", body)
 	}
 }
 

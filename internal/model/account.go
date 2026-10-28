@@ -28,4 +28,7 @@ type UpdateAccountRequest struct {
 type ChangePasswordRequest struct {
 	CurrentPassword string `json:"current_password,omitempty"`
 	NewPassword     string `json:"new_password"`
+	// OTPCode is the current two-factor code, needed for a self-service change
+	// when the account has 2FA on.
+	OTPCode string `json:"otp_code,omitempty"`
 }

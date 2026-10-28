@@ -9,29 +9,23 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/operinko-labs/stalwart-users/internal/auth"
+	"github.com/operinko-labs/stalwart-users/internal/oidc"
 	"github.com/operinko-labs/stalwart-users/internal/stalwart"
 )
 
 const passwordTestJWTSecret = "0123456789abcdef0123456789abcdef"
 
-type mockPasswordsStore struct {
-	authOK  bool
-	authErr error
-	setErr  error
+var passwordTestNow = time.Date(2026, 10, 28, 12, 0, 0, 0, time.UTC)
 
-	authSeen    [2]string
-	authCalls   int
+type mockPasswordsStore struct {
+	setErr error
+
 	updatedName string
 	updatedPass string
 	updateCalls int
-}
-
-func (m *mockPasswordsStore) Authenticate(_ context.Context, name, password string) (bool, error) {
-	m.authCalls++
-	m.authSeen = [2]string{name, password}
-	return m.authOK, m.authErr
 }
 
 func (m *mockPasswordsStore) SetPassword(name, password string) error {
@@ -41,234 +35,470 @@ func (m *mockPasswordsStore) SetPassword(name, password string) error {
 	return m.setErr
 }
 
-func TestChangePasswordHandlerUpdatesOwnPasswordWithValidCurrentPassword(t *testing.T) {
-	t.Parallel()
+type fakeSessionTokens struct {
+	entries map[string]oidc.Tokens
+	puts    int
+}
 
-	store := &mockPasswordsStore{authOK: true}
+func (f *fakeSessionTokens) Get(sessionID string) (oidc.Tokens, bool) {
+	t, ok := f.entries[sessionID]
+	return t, ok
+}
+
+func (f *fakeSessionTokens) Put(sessionID string, t oidc.Tokens) {
+	f.puts++
+	f.entries[sessionID] = t
+}
+
+type fakeRefresher struct {
+	result oidc.Tokens
+	err    error
+
+	calls int
+	seen  string
+}
+
+func (f *fakeRefresher) Refresh(_ context.Context, refreshToken string) (oidc.Tokens, error) {
+	f.calls++
+	f.seen = refreshToken
+	return f.result, f.err
+}
+
+type ownPasswordCall struct{ accessToken, current, next, otpCode string }
+
+type fakeOwnPassword struct {
+	errs  []error // returned in order; nil once exhausted
+	calls []ownPasswordCall
+}
+
+func (f *fakeOwnPassword) ChangeOwnPassword(_ context.Context, accessToken, current, next, otpCode string) error {
+	f.calls = append(f.calls, ownPasswordCall{accessToken, current, next, otpCode})
+	if len(f.errs) == 0 {
+		return nil
+	}
+	err := f.errs[0]
+	f.errs = f.errs[1:]
+	return err
+}
+
+type passwordFixture struct {
+	store     *mockPasswordsStore
+	tokens    *fakeSessionTokens
+	refresher *fakeRefresher
+	stalwart  *fakeOwnPassword
+
+	// stored, when set, is what the token store holds for the request's session.
+	stored *oidc.Tokens
+	// domains, when set, makes the user a domain admin for them.
+	domains []string
+	// sessionID is the id of the last request's session.
+	sessionID string
+}
+
+func newPasswordFixture() *passwordFixture {
+	return &passwordFixture{
+		store:     &mockPasswordsStore{},
+		tokens:    &fakeSessionTokens{entries: map[string]oidc.Tokens{}},
+		refresher: &fakeRefresher{},
+		stalwart:  &fakeOwnPassword{},
+	}
+}
+
+// serve sends a password change for name through the session middleware, as
+// username, so the handler sees the session id the way it does in production.
+func (f *passwordFixture) serve(t *testing.T, username string, isAdmin bool, name, body string) *httptest.ResponseRecorder {
+	t.Helper()
+
+	manager, err := auth.NewTokenManager(passwordTestJWTSecret)
+	if err != nil {
+		t.Fatalf("NewTokenManager() error = %v", err)
+	}
+	token, sessionID, err := manager.GenerateToken(username, isAdmin)
+	if err != nil {
+		t.Fatalf("GenerateToken() error = %v", err)
+	}
+	f.sessionID = sessionID
+	if f.stored != nil {
+		f.tokens.entries[sessionID] = *f.stored
+	}
+
+	req := httptest.NewRequest(http.MethodPut, "/accounts/"+name+"/password", strings.NewReader(body))
+	req.SetPathValue("name", name)
+	req.AddCookie(&http.Cookie{Name: "token", Value: token})
+	if f.domains != nil {
+		req = req.WithContext(auth.WithAdminDomains(req.Context(), f.domains))
+	}
+
+	h := &passwordHandler{
+		store:     f.store,
+		tokens:    f.tokens,
+		refresher: f.refresher,
+		stalwart:  f.stalwart,
+		now:       func() time.Time { return passwordTestNow },
+	}
 	rr := httptest.NewRecorder()
+	manager.Middleware(h).ServeHTTP(rr, req)
+	return rr
+}
 
-	serveChangePasswordRequest(t, store, rr, "alice", false, "/accounts/alice/password", `{"current_password":"old-password","new_password":"new-password"}`)
+func freshTokens() *oidc.Tokens {
+	return &oidc.Tokens{AccessToken: "user-at", RefreshToken: "user-rt", ExpiresAt: passwordTestNow.Add(time.Hour)}
+}
+
+const selfChangeBody = `{"current_password":"old-password","new_password":"new-password"}`
+
+func assertMessage(t *testing.T, rr *httptest.ResponseRecorder, message string) {
+	t.Helper()
 
 	if rr.Code != http.StatusOK {
 		t.Fatalf("status code = %d, want %d; body=%s", rr.Code, http.StatusOK, rr.Body.String())
 	}
-	if store.authCalls != 1 || store.authSeen != [2]string{"alice", "old-password"} {
-		t.Fatalf("Authenticate calls=%d seen=%v, want 1/alice old-password", store.authCalls, store.authSeen)
-	}
-	if store.updateCalls != 1 || store.updatedName != "alice" || store.updatedPass != "new-password" {
-		t.Fatalf("SetPassword calls=%d name=%q pass=%q, want 1/alice/new-password", store.updateCalls, store.updatedName, store.updatedPass)
-	}
-
 	var body map[string]string
 	if err := json.Unmarshal(rr.Body.Bytes(), &body); err != nil {
 		t.Fatalf("json.Unmarshal() error = %v", err)
 	}
-	if body["message"] != "password updated" {
-		t.Fatalf("response body = %#v, want password updated message", body)
+	if body["message"] != message {
+		t.Fatalf("response body = %#v, want message %q", body, message)
 	}
 }
 
-func TestChangePasswordSelfChecksCurrent(t *testing.T) {
+func TestChangeOwnPasswordUsesUserToken(t *testing.T) {
 	t.Parallel()
 
-	store := &mockPasswordsStore{authOK: false}
-	rr := httptest.NewRecorder()
+	f := newPasswordFixture()
+	f.stored = freshTokens()
 
-	serveChangePasswordRequest(t, store, rr, "alice", false, "/accounts/alice/password", `{"current_password":"wrong-password","new_password":"new-password"}`)
+	rr := f.serve(t, "alice@erinko.fi", false, "alice@erinko.fi", `{"current_password":"old-password","new_password":"new-password","otp_code":"123456"}`)
 
-	if rr.Code != http.StatusUnauthorized {
-		t.Fatalf("status code = %d, want %d", rr.Code, http.StatusUnauthorized)
+	assertMessage(t, rr, "password updated")
+	want := []ownPasswordCall{{"user-at", "old-password", "new-password", "123456"}}
+	if fmt.Sprint(f.stalwart.calls) != fmt.Sprint(want) {
+		t.Fatalf("ChangeOwnPassword calls = %v, want %v", f.stalwart.calls, want)
 	}
-	if store.updateCalls != 0 {
-		t.Fatalf("SetPassword calls = %d, want 0", store.updateCalls)
+	if f.store.updateCalls != 0 {
+		t.Fatalf("SetPassword calls = %d, want 0 (no admin API for self-service)", f.store.updateCalls)
+	}
+	if f.refresher.calls != 0 || f.tokens.puts != 0 {
+		t.Fatalf("refresh calls=%d puts=%d, want 0/0 for a fresh token", f.refresher.calls, f.tokens.puts)
 	}
 }
 
-func TestChangePasswordHandlerReturnsServerErrorWhenCheckFails(t *testing.T) {
+func TestChangeOwnPasswordDomainAdminSelfUsesUserToken(t *testing.T) {
 	t.Parallel()
 
-	store := &mockPasswordsStore{authErr: errors.New("stalwart down")}
-	rr := httptest.NewRecorder()
+	f := newPasswordFixture()
+	f.stored = freshTokens()
+	f.domains = []string{"client.fi"}
 
-	serveChangePasswordRequest(t, store, rr, "alice", false, "/accounts/alice/password", `{"current_password":"old-password","new_password":"new-password"}`)
+	rr := f.serve(t, "dora@client.fi", false, "Dora@Client.fi", selfChangeBody)
 
-	if rr.Code != http.StatusInternalServerError {
-		t.Fatalf("status code = %d, want %d", rr.Code, http.StatusInternalServerError)
+	assertMessage(t, rr, "password updated")
+	if len(f.stalwart.calls) != 1 || f.stalwart.calls[0].accessToken != "user-at" {
+		t.Fatalf("ChangeOwnPassword calls = %v, want one with the user token", f.stalwart.calls)
 	}
-	if store.updateCalls != 0 {
-		t.Fatalf("SetPassword calls = %d, want 0", store.updateCalls)
+	if f.store.updateCalls != 0 {
+		t.Fatalf("SetPassword calls = %d, want 0", f.store.updateCalls)
+	}
+}
+
+func TestChangeOwnPasswordRefreshesExpiredToken(t *testing.T) {
+	t.Parallel()
+
+	f := newPasswordFixture()
+	f.stored = &oidc.Tokens{AccessToken: "old-at", RefreshToken: "old-rt", ExpiresAt: passwordTestNow.Add(20 * time.Second)}
+	f.refresher.result = oidc.Tokens{AccessToken: "new-at", RefreshToken: "new-rt", ExpiresAt: passwordTestNow.Add(time.Hour)}
+
+	rr := f.serve(t, "alice@erinko.fi", false, "alice@erinko.fi", selfChangeBody)
+
+	assertMessage(t, rr, "password updated")
+	if f.refresher.calls != 1 || f.refresher.seen != "old-rt" {
+		t.Fatalf("Refresh calls=%d seen=%q, want 1/old-rt", f.refresher.calls, f.refresher.seen)
+	}
+	if f.tokens.puts != 1 || f.tokens.entries[f.sessionID] != f.refresher.result {
+		t.Fatalf("puts=%d stored=%v, want the refreshed tokens stored once", f.tokens.puts, f.tokens.entries[f.sessionID])
+	}
+	if len(f.stalwart.calls) != 1 || f.stalwart.calls[0].accessToken != "new-at" {
+		t.Fatalf("ChangeOwnPassword calls = %v, want one with the refreshed token", f.stalwart.calls)
+	}
+}
+
+func TestChangeOwnPasswordRefreshesOnceOnUnauthorized(t *testing.T) {
+	t.Parallel()
+
+	f := newPasswordFixture()
+	f.stored = freshTokens()
+	f.refresher.result = oidc.Tokens{AccessToken: "new-at", RefreshToken: "new-rt", ExpiresAt: passwordTestNow.Add(time.Hour)}
+	f.stalwart.errs = []error{fmt.Errorf("x:AccountPassword/set: %w", stalwart.ErrUnauthorized)}
+
+	rr := f.serve(t, "alice@erinko.fi", false, "alice@erinko.fi", selfChangeBody)
+
+	assertMessage(t, rr, "password updated")
+	if f.refresher.calls != 1 || f.tokens.puts != 1 {
+		t.Fatalf("refresh calls=%d puts=%d, want 1/1", f.refresher.calls, f.tokens.puts)
+	}
+	if len(f.stalwart.calls) != 2 || f.stalwart.calls[0].accessToken != "user-at" || f.stalwart.calls[1].accessToken != "new-at" {
+		t.Fatalf("ChangeOwnPassword calls = %v, want user-at then new-at", f.stalwart.calls)
+	}
+}
+
+func TestChangeOwnPasswordReauthWhenStillUnauthorized(t *testing.T) {
+	t.Parallel()
+
+	unauthorized := fmt.Errorf("x:AccountPassword/set: %w", stalwart.ErrUnauthorized)
+	tests := []struct {
+		name         string
+		stored       oidc.Tokens
+		wantRefresh  int
+		wantAttempts int
+	}{
+		{"retried after refresh", *freshTokens(), 1, 2},
+		// A token refreshed just now is not refreshed a second time.
+		{"just refreshed", oidc.Tokens{AccessToken: "old-at", RefreshToken: "old-rt", ExpiresAt: passwordTestNow}, 1, 1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			f := newPasswordFixture()
+			f.stored = &tt.stored
+			f.refresher.result = oidc.Tokens{AccessToken: "new-at", RefreshToken: "new-rt", ExpiresAt: passwordTestNow.Add(time.Hour)}
+			f.stalwart.errs = []error{unauthorized, unauthorized}
+
+			rr := f.serve(t, "alice@erinko.fi", false, "alice@erinko.fi", selfChangeBody)
+
+			assertError(t, rr, http.StatusUnauthorized, "reauth_required")
+			if f.refresher.calls != tt.wantRefresh || len(f.stalwart.calls) != tt.wantAttempts {
+				t.Fatalf("refresh calls=%d attempts=%d, want %d/%d", f.refresher.calls, len(f.stalwart.calls), tt.wantRefresh, tt.wantAttempts)
+			}
+		})
+	}
+}
+
+func TestChangeOwnPasswordReauthWhenRefreshFails(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name        string
+		stored      oidc.Tokens
+		refreshErr  error
+		wantRefresh int
+	}{
+		{"refresh error", oidc.Tokens{AccessToken: "old-at", RefreshToken: "old-rt", ExpiresAt: passwordTestNow.Add(-time.Minute)}, errors.New("oidc token: status 400: invalid_grant"), 1},
+		{"no refresh token", oidc.Tokens{AccessToken: "old-at", ExpiresAt: passwordTestNow.Add(10 * time.Second)}, nil, 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			f := newPasswordFixture()
+			f.stored = &tt.stored
+			f.refresher.err = tt.refreshErr
+
+			rr := f.serve(t, "alice@erinko.fi", false, "alice@erinko.fi", selfChangeBody)
+
+			assertError(t, rr, http.StatusUnauthorized, "reauth_required")
+			if f.refresher.calls != tt.wantRefresh {
+				t.Fatalf("Refresh calls = %d, want %d", f.refresher.calls, tt.wantRefresh)
+			}
+			if len(f.stalwart.calls) != 0 || f.tokens.puts != 0 || f.store.updateCalls != 0 {
+				t.Fatalf("attempts=%d puts=%d SetPassword=%d, want 0/0/0", len(f.stalwart.calls), f.tokens.puts, f.store.updateCalls)
+			}
+		})
+	}
+}
+
+func TestChangeOwnPasswordReauthWhenNoTokens(t *testing.T) {
+	t.Parallel()
+
+	f := newPasswordFixture()
+
+	rr := f.serve(t, "alice@erinko.fi", false, "alice@erinko.fi", selfChangeBody)
+
+	assertError(t, rr, http.StatusUnauthorized, "reauth_required")
+	if len(f.stalwart.calls) != 0 || f.store.updateCalls != 0 || f.refresher.calls != 0 {
+		t.Fatalf("attempts=%d SetPassword=%d refresh=%d, want 0/0/0", len(f.stalwart.calls), f.store.updateCalls, f.refresher.calls)
+	}
+}
+
+func TestChangeOwnPasswordOtpRequired(t *testing.T) {
+	t.Parallel()
+
+	f := newPasswordFixture()
+	f.stored = freshTokens()
+	f.stalwart.errs = []error{fmt.Errorf("change own password: %w", stalwart.ErrOTPRequired)}
+
+	rr := f.serve(t, "alice@erinko.fi", false, "alice@erinko.fi", selfChangeBody)
+
+	assertError(t, rr, http.StatusBadRequest, "otp_required")
+}
+
+func TestChangeOwnPasswordMapsStalwartErrors(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		err     error
+		status  int
+		message string
+	}{
+		{"wrong current password", stalwart.ErrCurrentPasswordIncorrect, http.StatusUnauthorized, "invalid current password"},
+		{"weak password", stalwart.ErrInvalid{Description: "Password is too weak"}, http.StatusBadRequest, "Password is too weak"},
+		{"not allowed", stalwart.ErrPasswordChangeNotAllowed, http.StatusForbidden, "password change not allowed"},
+		{"anything else", errors.New("x:AccountPassword/set request failed with status 429"), http.StatusInternalServerError, "internal error"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			f := newPasswordFixture()
+			f.stored = freshTokens()
+			f.stalwart.errs = []error{fmt.Errorf("change own password: %w", tt.err)}
+
+			rr := f.serve(t, "alice@erinko.fi", false, "alice@erinko.fi", `{"current_password":"old-password","new_password":"new-password","otp_code":"123456"}`)
+
+			assertError(t, rr, tt.status, tt.message)
+			for _, secret := range []string{"old-password", "new-password", "123456", "user-at", "user-rt"} {
+				if strings.Contains(rr.Body.String(), secret) {
+					t.Fatalf("response %q leaks a secret", rr.Body.String())
+				}
+			}
+			if f.store.updateCalls != 0 {
+				t.Fatalf("SetPassword calls = %d, want 0", f.store.updateCalls)
+			}
+		})
+	}
+}
+
+func TestChangeOwnPasswordRequiresCurrentPassword(t *testing.T) {
+	t.Parallel()
+
+	f := newPasswordFixture()
+	f.stored = freshTokens()
+
+	rr := f.serve(t, "alice@erinko.fi", false, "alice@erinko.fi", `{"new_password":"new-password"}`)
+
+	assertError(t, rr, http.StatusBadRequest, "current_password is required")
+	if len(f.stalwart.calls) != 0 || f.store.updateCalls != 0 {
+		t.Fatalf("attempts=%d SetPassword=%d, want 0/0", len(f.stalwart.calls), f.store.updateCalls)
+	}
+}
+
+func TestAdminResetStillUsesAdminKey(t *testing.T) {
+	t.Parallel()
+
+	f := newPasswordFixture()
+	f.stored = freshTokens()
+
+	rr := f.serve(t, "admin@erinko.fi", true, "alice@erinko.fi", `{"new_password":"new-password"}`)
+
+	assertMessage(t, rr, "password updated")
+	if f.store.updateCalls != 1 || f.store.updatedName != "alice@erinko.fi" || f.store.updatedPass != "new-password" {
+		t.Fatalf("SetPassword calls=%d name=%q pass=%q, want 1/alice@erinko.fi/new-password", f.store.updateCalls, f.store.updatedName, f.store.updatedPass)
+	}
+	if len(f.stalwart.calls) != 0 || f.refresher.calls != 0 {
+		t.Fatalf("attempts=%d refresh=%d, want 0/0", len(f.stalwart.calls), f.refresher.calls)
+	}
+}
+
+func TestChangePasswordFullAdminSelfUsesAdminKey(t *testing.T) {
+	t.Parallel()
+
+	f := newPasswordFixture()
+	f.stored = freshTokens()
+
+	rr := f.serve(t, "admin@erinko.fi", true, "Admin@erinko.fi", `{"new_password":"new-password"}`)
+
+	assertMessage(t, rr, "password updated")
+	if f.store.updateCalls != 1 || len(f.stalwart.calls) != 0 {
+		t.Fatalf("SetPassword calls=%d attempts=%d, want 1/0", f.store.updateCalls, len(f.stalwart.calls))
 	}
 }
 
 func TestChangePasswordWeakPassword(t *testing.T) {
 	t.Parallel()
 
-	store := &mockPasswordsStore{setErr: fmt.Errorf("update account: %w", stalwart.ErrInvalid{Description: "Password is too weak"})}
-	rr := httptest.NewRecorder()
+	f := newPasswordFixture()
+	f.store.setErr = fmt.Errorf("update account: %w", stalwart.ErrInvalid{Description: "Password is too weak"})
 
-	serveChangePasswordRequest(t, store, rr, "admin", true, "/accounts/alice/password", `{"new_password":"weak"}`)
+	rr := f.serve(t, "admin", true, "alice", `{"new_password":"weak"}`)
 
-	if rr.Code != http.StatusBadRequest {
-		t.Fatalf("status code = %d, want %d; body=%s", rr.Code, http.StatusBadRequest, rr.Body.String())
-	}
-	var body map[string]string
-	if err := json.Unmarshal(rr.Body.Bytes(), &body); err != nil {
-		t.Fatalf("json.Unmarshal() error = %v", err)
-	}
-	if body["error"] != "Password is too weak" {
-		t.Fatalf("error = %q, want Stalwart's description", body["error"])
-	}
-}
-
-func TestChangePasswordHandlerAllowsAdminResetWithoutCurrentPassword(t *testing.T) {
-	t.Parallel()
-
-	store := &mockPasswordsStore{}
-	rr := httptest.NewRecorder()
-
-	serveChangePasswordRequest(t, store, rr, "admin", true, "/accounts/alice/password", `{"new_password":"new-password"}`)
-
-	if rr.Code != http.StatusOK {
-		t.Fatalf("status code = %d, want %d; body=%s", rr.Code, http.StatusOK, rr.Body.String())
-	}
-	if store.authCalls != 0 {
-		t.Fatalf("Authenticate calls = %d, want 0", store.authCalls)
-	}
-	if store.updateCalls != 1 || store.updatedName != "alice" || store.updatedPass != "new-password" {
-		t.Fatalf("SetPassword calls=%d name=%q, want 1/alice", store.updateCalls, store.updatedName)
-	}
+	assertError(t, rr, http.StatusBadRequest, "Password is too weak")
 }
 
 func TestChangePasswordHandlerRejectsNonAdminChangingAnotherUser(t *testing.T) {
 	t.Parallel()
 
-	store := &mockPasswordsStore{}
-	rr := httptest.NewRecorder()
+	f := newPasswordFixture()
+	f.stored = freshTokens()
 
-	serveChangePasswordRequest(t, store, rr, "alice", false, "/accounts/bob/password", `{"current_password":"old-password","new_password":"new-password"}`)
+	rr := f.serve(t, "alice", false, "bob", selfChangeBody)
 
-	if rr.Code != http.StatusForbidden {
-		t.Fatalf("status code = %d, want %d", rr.Code, http.StatusForbidden)
-	}
-	if store.authCalls != 0 || store.updateCalls != 0 {
-		t.Fatalf("store calls = get:%d update:%d, want 0/0", store.authCalls, store.updateCalls)
+	assertError(t, rr, http.StatusForbidden, "forbidden")
+	if len(f.stalwart.calls) != 0 || f.store.updateCalls != 0 {
+		t.Fatalf("attempts=%d SetPassword=%d, want 0/0", len(f.stalwart.calls), f.store.updateCalls)
 	}
 }
 
 func TestChangePasswordHandlerLetsDomainAdminsResetWithoutCurrentPassword(t *testing.T) {
 	t.Parallel()
 
-	store := &mockPasswordsStore{}
-	rr := httptest.NewRecorder()
+	f := newPasswordFixture()
+	f.domains = []string{"client.fi"}
 
-	serveDomainAdminPasswordRequest(store, rr, "bob@client.fi", `{"new_password":"new-password"}`)
+	rr := f.serve(t, "dora@client.fi", false, "bob@client.fi", `{"new_password":"new-password"}`)
 
-	if rr.Code != http.StatusOK {
-		t.Fatalf("status code = %d, want %d; body=%s", rr.Code, http.StatusOK, rr.Body.String())
-	}
-	if store.authCalls != 0 {
-		t.Fatalf("Authenticate calls = %d, want 0", store.authCalls)
-	}
-	if store.updateCalls != 1 || store.updatedName != "bob@client.fi" {
-		t.Fatalf("SetPassword calls=%d name=%q, want 1/bob@client.fi", store.updateCalls, store.updatedName)
-	}
-}
-
-func TestChangePasswordHandlerRequiresCurrentPasswordForDomainAdminsOwnAccount(t *testing.T) {
-	t.Parallel()
-
-	store := &mockPasswordsStore{}
-	rr := httptest.NewRecorder()
-
-	serveDomainAdminPasswordRequest(store, rr, "dora@client.fi", `{"new_password":"new-password"}`)
-
-	if rr.Code != http.StatusBadRequest {
-		t.Fatalf("status code = %d, want %d", rr.Code, http.StatusBadRequest)
-	}
-	if store.updateCalls != 0 {
-		t.Fatalf("SetPassword calls = %d, want 0", store.updateCalls)
+	assertMessage(t, rr, "password updated")
+	if f.store.updateCalls != 1 || f.store.updatedName != "bob@client.fi" || len(f.stalwart.calls) != 0 {
+		t.Fatalf("SetPassword calls=%d name=%q attempts=%d, want 1/bob@client.fi/0", f.store.updateCalls, f.store.updatedName, len(f.stalwart.calls))
 	}
 }
 
 func TestChangePasswordHandlerTreatsMixedCaseOwnAccountAsSelf(t *testing.T) {
 	t.Parallel()
 
-	store := &mockPasswordsStore{}
-	rr := httptest.NewRecorder()
+	f := newPasswordFixture()
+	f.domains = []string{"client.fi"}
 
-	serveDomainAdminPasswordRequest(store, rr, "Dora@Client.fi", `{"new_password":"new-password"}`)
+	rr := f.serve(t, "dora@client.fi", false, "Dora@Client.fi", `{"new_password":"new-password"}`)
 
 	assertError(t, rr, http.StatusBadRequest, "current_password is required")
-	if store.updateCalls != 0 {
-		t.Fatalf("SetPassword calls = %d, want 0", store.updateCalls)
+	if f.store.updateCalls != 0 {
+		t.Fatalf("SetPassword calls = %d, want 0", f.store.updateCalls)
 	}
 }
 
 func TestChangePasswordHandlerRejectsDomainAdminsOutsideTheirDomains(t *testing.T) {
 	t.Parallel()
 
-	store := &mockPasswordsStore{}
-	rr := httptest.NewRecorder()
+	f := newPasswordFixture()
+	f.domains = []string{"client.fi"}
 
-	serveDomainAdminPasswordRequest(store, rr, "eve@other.fi", `{"new_password":"new-password"}`)
+	rr := f.serve(t, "dora@client.fi", false, "eve@other.fi", `{"new_password":"new-password"}`)
 
-	if rr.Code != http.StatusForbidden {
-		t.Fatalf("status code = %d, want %d", rr.Code, http.StatusForbidden)
+	assertError(t, rr, http.StatusForbidden, "forbidden")
+	if f.store.updateCalls != 0 {
+		t.Fatalf("SetPassword calls = %d, want 0", f.store.updateCalls)
 	}
-	if store.updateCalls != 0 {
-		t.Fatalf("SetPassword calls = %d, want 0", store.updateCalls)
-	}
-}
-
-func serveDomainAdminPasswordRequest(store passwordsStore, rr *httptest.ResponseRecorder, name, body string) {
-	req := asDomainAdmin(httptest.NewRequest(http.MethodPut, "/accounts/"+name+"/password", strings.NewReader(body)), "client.fi")
-	req.SetPathValue("name", name)
-
-	newChangePasswordHandler(store).ServeHTTP(rr, req)
 }
 
 func TestChangePasswordHandlerReturnsNotFoundWhenAccountMissing(t *testing.T) {
 	t.Parallel()
 
-	store := &mockPasswordsStore{setErr: errAccountNotFound}
-	rr := httptest.NewRecorder()
+	f := newPasswordFixture()
+	f.store.setErr = errAccountNotFound
 
-	serveChangePasswordRequest(t, store, rr, "admin", true, "/accounts/alice/password", `{"new_password":"new-password"}`)
+	rr := f.serve(t, "admin", true, "alice", `{"new_password":"new-password"}`)
 
-	if rr.Code != http.StatusNotFound {
-		t.Fatalf("status code = %d, want %d", rr.Code, http.StatusNotFound)
-	}
+	assertError(t, rr, http.StatusNotFound, "account not found")
 }
 
 func TestChangePasswordHandlerReturnsInternalServerErrorOnUpdateFailure(t *testing.T) {
 	t.Parallel()
 
-	store := &mockPasswordsStore{setErr: errors.New("boom")}
-	rr := httptest.NewRecorder()
+	f := newPasswordFixture()
+	f.store.setErr = errors.New("boom")
 
-	serveChangePasswordRequest(t, store, rr, "admin", true, "/accounts/alice/password", `{"new_password":"new-password"}`)
+	rr := f.serve(t, "admin", true, "alice", `{"new_password":"new-password"}`)
 
-	if rr.Code != http.StatusInternalServerError {
-		t.Fatalf("status code = %d, want %d", rr.Code, http.StatusInternalServerError)
-	}
-}
-
-func serveChangePasswordRequest(t *testing.T, store passwordsStore, rr *httptest.ResponseRecorder, username string, isAdmin bool, targetURL, body string) {
-	t.Helper()
-
-	tokens, err := auth.NewTokenManager(passwordTestJWTSecret)
-	if err != nil {
-		t.Fatalf("NewTokenManager() error = %v", err)
-	}
-
-	token, _, err := tokens.GenerateToken(username, isAdmin)
-	if err != nil {
-		t.Fatalf("GenerateToken() error = %v", err)
-	}
-
-	req := httptest.NewRequest(http.MethodPut, targetURL, strings.NewReader(body))
-	req.SetPathValue("name", strings.TrimPrefix(strings.TrimSuffix(targetURL, "/password"), "/accounts/"))
-	req.AddCookie(&http.Cookie{Name: "token", Value: token})
-
-	tokens.Middleware(newChangePasswordHandler(store)).ServeHTTP(rr, req)
+	assertError(t, rr, http.StatusInternalServerError, "internal error")
 }

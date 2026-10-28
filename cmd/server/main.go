@@ -149,7 +149,10 @@ func newServerHandler(cfg serverConfig, pool *db.Pool, store *directory.Store) (
 	apiRouter.HandleFunc("POST /auth/logout", auth.LogoutHandler(tokens, oauthTokens))
 
 	protectedRouter := http.NewServeMux()
-	protectedRouter.HandleFunc("PUT /accounts/{name}/password", api.ChangePasswordHandler(store))
+	// Self-service password changes run as the user (their OAuth access
+	// token), so this client carries no admin key.
+	userStalwart := stalwart.NewClient(cfg.StalwartURL, "")
+	protectedRouter.HandleFunc("PUT /accounts/{name}/password", api.ChangePasswordHandler(store, oauthTokens, oidcClient, userStalwart))
 	protectedRouter.HandleFunc("GET /accounts/{name}/admin-domains", api.AdminDomainsHandler(store))
 	protectedRouter.HandleFunc("PUT /accounts/{name}/admin-domains", api.AdminDomainsHandler(store))
 	protectedRouter.HandleFunc("GET /accounts", api.AccountsHandler(store))

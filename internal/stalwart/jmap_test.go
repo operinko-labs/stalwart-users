@@ -4,12 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"net"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
-	"strings"
-	"sync/atomic"
 	"testing"
 )
 
@@ -363,53 +360,6 @@ func TestListDomains(t *testing.T) {
 	}
 }
 
-func TestAuthenticate(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name    string
-		status  int
-		want    bool
-		wantErr bool
-	}{
-		{name: "valid", status: http.StatusOK, want: true},
-		{name: "invalid", status: http.StatusUnauthorized, want: false},
-		{name: "server error", status: http.StatusInternalServerError, wantErr: true},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				if r.Method != http.MethodGet || r.URL.Path != "/jmap/session" {
-					t.Fatalf("request = %s %s, want GET /jmap/session", r.Method, r.URL.Path)
-				}
-				user, pass, ok := r.BasicAuth()
-				if !ok || user != "olli@erinko.fi" || pass != "s3cret" {
-					t.Fatalf("basic auth = %q/%q/%v, want olli@erinko.fi/s3cret", user, pass, ok)
-				}
-				if got := r.Header.Get("Authorization"); strings.Contains(got, "Bearer") || !strings.HasPrefix(got, "Basic ") {
-					t.Fatalf("Authorization = %q, want Basic and no bearer token", got)
-				}
-				w.WriteHeader(tt.status)
-			}))
-			defer server.Close()
-
-			client := NewClient(server.URL, "test-token")
-			client.httpClient = server.Client()
-
-			got, err := client.Authenticate(context.Background(), "olli@erinko.fi", "s3cret")
-			if (err != nil) != tt.wantErr {
-				t.Fatalf("Authenticate() error = %v, wantErr %v", err, tt.wantErr)
-			}
-			if got != tt.want {
-				t.Fatalf("Authenticate() = %v, want %v", got, tt.want)
-			}
-		})
-	}
-}
-
 func TestCreateAccountZeroQuotaSendsEmptyQuotas(t *testing.T) {
 	t.Parallel()
 
@@ -687,35 +637,152 @@ func TestCreateAccountAlreadyExists(t *testing.T) {
 	}
 }
 
-// Authenticate drains the session response so the keep-alive connection is
-// reused; an undrained body makes the transport close it.
-func TestAuthenticateDrainsBodyForConnectionReuse(t *testing.T) {
+func TestChangeOwnPasswordPayload(t *testing.T) {
 	t.Parallel()
 
-	var newConns atomic.Int32
-	server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if _, _, ok := r.BasicAuth(); !ok {
-			t.Error("request without basic auth")
-		}
-		_, _ = w.Write([]byte(`{"capabilities":{},"accounts":{},"username":"bob@erinko.fi"}`))
-	}))
-	server.Config.ConnState = func(_ net.Conn, state http.ConnState) {
-		if state == http.StateNew {
-			newConns.Add(1)
+	tests := []struct {
+		name    string
+		otpCode string
+		want    map[string]any
+	}{
+		{
+			name: "without code",
+			want: map[string]any{"secret": "new-pw", "currentSecret": "old-pw"},
+		},
+		{
+			name:    "with code",
+			otpCode: "123456",
+			want: map[string]any{
+				"secret":        "new-pw",
+				"currentSecret": "old-pw",
+				"otpAuth":       map[string]any{"otpCode": "123456"},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != http.MethodPost || r.URL.Path != "/jmap/" {
+					t.Errorf("request = %s %s, want POST /jmap/", r.Method, r.URL.Path)
+				}
+				if got := r.Header.Get("Authorization"); got != "Bearer user-access-token" {
+					t.Errorf("Authorization = %q, want the user's bearer token", got)
+				}
+				request := decodeTestJMAPRequest(t, r)
+				method, args := decodeTestMethodCall(t, request.MethodCalls[0])
+				if method != "x:AccountPassword/set" {
+					t.Errorf("method = %q, want x:AccountPassword/set", method)
+				}
+				want := map[string]any{"update": map[string]any{"singleton": tt.want}}
+				if !reflect.DeepEqual(args, want) {
+					t.Errorf("args = %#v, want %#v", args, want)
+				}
+				_, _ = w.Write([]byte(`{"methodResponses":[["x:AccountPassword/set",{"updated":{"singleton":null}},"c1"]]}`))
+			}))
+			defer server.Close()
+
+			client := NewClient(server.URL, "admin-key")
+			client.httpClient = server.Client()
+
+			if err := client.ChangeOwnPassword(context.Background(), "user-access-token", "old-pw", "new-pw", tt.otpCode); err != nil {
+				t.Fatalf("ChangeOwnPassword() error = %v", err)
+			}
+		})
+	}
+}
+
+func TestChangeOwnPasswordErrors(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		status   int
+		response string
+		check    func(t *testing.T, err error)
+	}{
+		{
+			name:     "wrong current password",
+			response: `{"notUpdated":{"singleton":{"type":"forbidden","description":"Current secret is incorrect."}}}`,
+			check:    wantIs(ErrCurrentPasswordIncorrect),
+		},
+		{
+			name:     "otp required",
+			response: `{"notUpdated":{"singleton":{"type":"forbidden","description":"Current OTP code is required to change the password or OTP auth."}}}`,
+			check:    wantIs(ErrOTPRequired),
+		},
+		{
+			name:     "weak password",
+			response: `{"notUpdated":{"singleton":{"type":"invalidProperties","description":"Password is too weak","properties":["secret"]}}}`,
+			check: func(t *testing.T, err error) {
+				var invalid ErrInvalid
+				if !errors.As(err, &invalid) || invalid.Description != "Password is too weak" {
+					t.Fatalf("error = %v, want ErrInvalid with Stalwart's description", err)
+				}
+			},
+		},
+		{
+			name:     "other forbidden",
+			response: `{"notUpdated":{"singleton":{"type":"forbidden","description":"Operation not allowed."}}}`,
+			check:    wantIs(ErrPasswordChangeNotAllowed),
+		},
+		{
+			name:   "expired token",
+			status: http.StatusUnauthorized,
+			check:  wantIs(ErrUnauthorized),
+		},
+		{
+			name:     "missing singleton",
+			response: `{"updated":{}}`,
+			check:    wantGeneric,
+		},
+		{
+			name:   "server error",
+			status: http.StatusInternalServerError,
+			check:  wantGeneric,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if tt.status != 0 {
+					w.WriteHeader(tt.status)
+					return
+				}
+				body, _ := json.Marshal(map[string]any{"methodResponses": []any{
+					[]any{"x:AccountPassword/set", json.RawMessage(tt.response), "c1"},
+				}})
+				_, _ = w.Write(body)
+			}))
+			defer server.Close()
+
+			client := NewClient(server.URL, "admin-key")
+			client.httpClient = server.Client()
+
+			tt.check(t, client.ChangeOwnPassword(context.Background(), "user-access-token", "old-pw", "new-pw", ""))
+		})
+	}
+}
+
+func wantIs(target error) func(t *testing.T, err error) {
+	return func(t *testing.T, err error) {
+		t.Helper()
+		if !errors.Is(err, target) {
+			t.Fatalf("error = %v, want %v", err, target)
 		}
 	}
-	server.Start()
-	defer server.Close()
+}
 
-	client := NewClient(server.URL, "test-token")
-	client.httpClient = server.Client()
-
-	for range 2 {
-		if ok, err := client.Authenticate(context.Background(), "bob@erinko.fi", "pw"); err != nil || !ok {
-			t.Fatalf("Authenticate() = %v, %v; want true", ok, err)
-		}
-	}
-	if n := newConns.Load(); n != 1 {
-		t.Fatalf("connections = %d, want 1 (body drained, connection reused)", n)
+func wantGeneric(t *testing.T, err error) {
+	t.Helper()
+	var invalid ErrInvalid
+	if err == nil || errors.Is(err, ErrCurrentPasswordIncorrect) || errors.Is(err, ErrOTPRequired) ||
+		errors.Is(err, ErrPasswordChangeNotAllowed) || errors.Is(err, ErrUnauthorized) || errors.As(err, &invalid) {
+		t.Fatalf("error = %v, want a generic error", err)
 	}
 }

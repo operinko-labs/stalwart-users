@@ -27,16 +27,9 @@ type fakeClient struct {
 	updateCalls int
 	deleted     []string
 
-	authOK       bool
-	authSeen     [2]string
 	passwordFor  stalwart.Account
 	passwordSent string
 	passwordErr  error
-}
-
-func (f *fakeClient) Authenticate(_ context.Context, username, password string) (bool, error) {
-	f.authSeen = [2]string{username, password}
-	return f.authOK, nil
 }
 
 func (f *fakeClient) SetPassword(_ context.Context, account stalwart.Account, secret string) error {
@@ -562,20 +555,6 @@ func TestRemoveGroupMissing(t *testing.T) {
 	}
 }
 
-func TestAuthenticateDelegates(t *testing.T) {
-	t.Parallel()
-
-	store, client, _ := newStore()
-	client.authOK = true
-	ok, err := store.Authenticate(context.Background(), "dora@client.fi", "pw")
-	if err != nil || !ok {
-		t.Fatalf("Authenticate() = %v, %v; want true, nil", ok, err)
-	}
-	if client.authSeen != [2]string{"dora@client.fi", "pw"} {
-		t.Fatalf("client saw %v", client.authSeen)
-	}
-}
-
 func TestSetPasswordFindsAccount(t *testing.T) {
 	t.Parallel()
 
@@ -614,7 +593,7 @@ func TestSetPasswordUnknown(t *testing.T) {
 func TestMixedCaseNamesUseCanonicalName(t *testing.T) {
 	t.Parallel()
 
-	store, client, admins := newStore()
+	store, _, admins := newStore()
 	admins.domains = map[string][]string{"dora@client.fi": {"client.fi", "other.fi"}}
 
 	domains, err := store.ListAdminDomains(" Dora@CLIENT.fi")
@@ -629,12 +608,6 @@ func TestMixedCaseNamesUseCanonicalName(t *testing.T) {
 	}
 	if _, ok := admins.set["dora@client.fi"]; !ok || len(admins.set) != 1 {
 		t.Fatalf("SetAdminDomains wrote %v, want key dora@client.fi", admins.set)
-	}
-	if _, err := store.Authenticate(context.Background(), " Dora@Client.FI ", "pw"); err != nil {
-		t.Fatalf("Authenticate() error = %v", err)
-	}
-	if client.authSeen[0] != "dora@client.fi" {
-		t.Fatalf("Authenticate sent %q, want dora@client.fi", client.authSeen[0])
 	}
 }
 

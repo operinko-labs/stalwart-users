@@ -26,9 +26,6 @@ func (emptyStalwart) CreateAccount(context.Context, string, string, string, int6
 }
 func (emptyStalwart) UpdateAccount(context.Context, string, map[string]any) error { return nil }
 func (emptyStalwart) DeleteAccount(context.Context, string) error                 { return nil }
-func (emptyStalwart) Authenticate(context.Context, string, string) (bool, error) {
-	return false, nil
-}
 func (emptyStalwart) SetPassword(context.Context, stalwart.Account, string) error { return nil }
 
 // accountsStalwart is a Stalwart holding a fixed set of accounts.

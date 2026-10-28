@@ -24,8 +24,9 @@ const (
 type contextKey string
 
 const (
-	usernameKey contextKey = "username"
-	isAdminKey  contextKey = "isAdmin"
+	usernameKey  contextKey = "username"
+	isAdminKey   contextKey = "isAdmin"
+	sessionIDKey contextKey = "sessionID"
 )
 
 var ErrMissingJWTSecret = errors.New("JWT_SECRET is required")
@@ -187,7 +188,8 @@ func (m *TokenManager) Middleware(next http.Handler) http.Handler {
 			return
 		}
 
-		next.ServeHTTP(w, r.WithContext(WithUser(r.Context(), session.Username, session.IsAdmin)))
+		ctx := WithUser(r.Context(), session.Username, session.IsAdmin)
+		next.ServeHTTP(w, r.WithContext(context.WithValue(ctx, sessionIDKey, session.ID)))
 	})
 }
 
@@ -197,6 +199,13 @@ func UsernameFromContext(ctx context.Context) string {
 		return ""
 	}
 	return username
+}
+
+// SessionIDFromContext returns the session id that keys the user's OAuth
+// tokens in the TokenStore, or "" when there is none.
+func SessionIDFromContext(ctx context.Context) string {
+	id, _ := ctx.Value(sessionIDKey).(string)
+	return id
 }
 
 func IsAdminFromContext(ctx context.Context) bool {

@@ -373,9 +373,6 @@ func (f *sharedAddressStalwart) UpdateAccount(context.Context, string, map[strin
 	return nil
 }
 func (*sharedAddressStalwart) DeleteAccount(context.Context, string) error { return nil }
-func (*sharedAddressStalwart) Authenticate(context.Context, string, string) (bool, error) {
-	return false, nil
-}
 func (*sharedAddressStalwart) SetPassword(context.Context, stalwart.Account, string) error {
 	return nil
 }

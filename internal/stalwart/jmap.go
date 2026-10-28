@@ -17,10 +17,6 @@ import (
 const (
 	jmapCoreCapability     = "urn:ietf:params:jmap:core"
 	jmapStalwartCapability = "urn:stalwart:jmap"
-
-	// maxDrainBytes bounds how much of an unread response body is discarded
-	// before closing it.
-	maxDrainBytes = 64 << 10
 )
 
 type Client struct {
@@ -66,6 +62,19 @@ type jmapSetResponse struct {
 type ErrInvalid struct{ Description string }
 
 func (e ErrInvalid) Error() string { return e.Description }
+
+// ErrUnauthorized marks an HTTP 401 from Stalwart: the bearer token was
+// rejected (for a user token, usually because it expired).
+var ErrUnauthorized = errors.New("stalwart rejected the access token")
+
+// Answers to x:AccountPassword/set, the user's own password change.
+var (
+	ErrCurrentPasswordIncorrect = errors.New("current password is incorrect")
+	ErrOTPRequired              = errors.New("two-factor code required")
+	// ErrPasswordChangeNotAllowed is any other "forbidden" answer, e.g. an
+	// account from an external directory or one without a password.
+	ErrPasswordChangeNotAllowed = errors.New("password change not allowed")
+)
 
 // ErrAlreadyExists marks a set error of type "alreadyExists": the object
 // (e.g. the account address) already exists in Stalwart.
@@ -215,6 +224,49 @@ func passwordCredential(secret string) map[string]any {
 	return map[string]any{"@type": "Password", "secret": secret}
 }
 
+// ChangeOwnPassword changes the password of the account userAccessToken belongs
+// to through x:AccountPassword/set, so Stalwart itself checks current (and
+// otpCode, sent only when given). Weak passwords come back as ErrInvalid. The
+// admin key is never sent.
+func (c *Client) ChangeOwnPassword(ctx context.Context, userAccessToken, current, next, otpCode string) error {
+	patch := map[string]any{"secret": next, "currentSecret": current}
+	if otpCode != "" {
+		patch["otpAuth"] = map[string]any{"otpCode": otpCode}
+	}
+
+	var response jmapSetResponse
+	if err := c.callAs(ctx, userAccessToken, "x:AccountPassword/set", map[string]any{
+		"update": map[string]any{"singleton": patch},
+	}, &response); err != nil {
+		return fmt.Errorf("change own password: %w", err)
+	}
+
+	if setErr, ok := response.NotUpdated["singleton"]; ok {
+		return fmt.Errorf("change own password: %w", accountPasswordError(setErr))
+	}
+	if _, ok := response.Updated["singleton"]; !ok {
+		return errors.New("change own password: singleton not in update response")
+	}
+
+	return nil
+}
+
+// accountPasswordError maps x:AccountPassword/set's notUpdated answer. Stalwart
+// tells its forbidden cases apart only by description.
+func accountPasswordError(setErr jmapError) error {
+	if setErr.Type != "forbidden" {
+		return firstJMAPError(map[string]jmapError{"singleton": setErr})
+	}
+	switch {
+	case setErr.Description == "Current secret is incorrect.":
+		return ErrCurrentPasswordIncorrect
+	case strings.HasPrefix(setErr.Description, "Current OTP code is required"):
+		return ErrOTPRequired
+	default:
+		return fmt.Errorf("%w: %s", ErrPasswordChangeNotAllowed, setErr.Description)
+	}
+}
+
 func (c *Client) DeleteAccount(ctx context.Context, name string) error {
 	localPart, domain, err := splitAddress(name)
 	if err != nil {
@@ -304,35 +356,6 @@ func (c *Client) ListDomains(ctx context.Context) ([]Domain, error) {
 	return response.List, nil
 }
 
-// Authenticate checks a user's credentials against Stalwart's JMAP session
-// endpoint. It deliberately does not send the admin bearer token.
-func (c *Client) Authenticate(ctx context.Context, username, password string) (bool, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/jmap/session", nil)
-	if err != nil {
-		return false, fmt.Errorf("build authenticate request: %w", err)
-	}
-	req.SetBasicAuth(username, password)
-
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return false, fmt.Errorf("send authenticate request: %w", err)
-	}
-	defer func() {
-		// Drain (bounded) so the keep-alive connection can be reused.
-		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, maxDrainBytes))
-		resp.Body.Close()
-	}()
-
-	switch resp.StatusCode {
-	case http.StatusOK:
-		return true, nil
-	case http.StatusUnauthorized:
-		return false, nil
-	default:
-		return false, fmt.Errorf("authenticate request failed with status %d", resp.StatusCode)
-	}
-}
-
 func (c *Client) queryDomainID(ctx context.Context, domain string) (string, error) {
 	var response jmapQueryResponse
 	if err := c.call(ctx, "x:Domain/query", map[string]any{
@@ -367,6 +390,11 @@ func (c *Client) queryAccountID(ctx context.Context, localPart, domainID string)
 }
 
 func (c *Client) call(ctx context.Context, method string, arguments any, target any) error {
+	return c.callAs(ctx, c.adminToken, method, arguments, target)
+}
+
+// callAs sends one JMAP method call authenticated with bearerToken.
+func (c *Client) callAs(ctx context.Context, bearerToken, method string, arguments any, target any) error {
 	body, err := json.Marshal(jmapRequest{
 		Using:       []string{jmapCoreCapability, jmapStalwartCapability},
 		MethodCalls: []jmapMethodCall{{method, arguments, "c1"}},
@@ -379,7 +407,7 @@ func (c *Client) call(ctx context.Context, method string, arguments any, target 
 	if err != nil {
 		return fmt.Errorf("build %s request: %w", method, err)
 	}
-	req.Header.Set("Authorization", "Bearer "+c.adminToken)
+	req.Header.Set("Authorization", "Bearer "+bearerToken)
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := c.httpClient.Do(req)
@@ -388,6 +416,9 @@ func (c *Client) call(ctx context.Context, method string, arguments any, target 
 	}
 	defer resp.Body.Close()
 
+	if resp.StatusCode == http.StatusUnauthorized {
+		return fmt.Errorf("%s: %w", method, ErrUnauthorized)
+	}
 	if resp.StatusCode != http.StatusOK {
 		responseBody, readErr := io.ReadAll(resp.Body)
 		if readErr != nil {

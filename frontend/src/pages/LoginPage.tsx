@@ -6,6 +6,7 @@ const ERROR_MESSAGES: Record<string, string> = {
   state: 'Sign-in expired, please try again.',
   signin: 'Sign-in failed, please try again.',
   no_mailbox: 'This account has no mailbox here.',
+  reauth: 'Please sign in again to change your password.',
 }
 
 export default function LoginPage() {
@@ -13,7 +14,7 @@ export default function LoginPage() {
   const [searchParams] = useSearchParams()
   const errorCode = searchParams.get('error')
   // An unknown code gets the generic message.
-  const error = errorCode ? (ERROR_MESSAGES[errorCode] ?? ERROR_MESSAGES.signin) : ''
+  const error = errorCode ? (Object.hasOwn(ERROR_MESSAGES, errorCode) ? ERROR_MESSAGES[errorCode] : ERROR_MESSAGES.signin) : ''
 
   if (isLoading) {
     return <div className="page-status">Loading…</div>

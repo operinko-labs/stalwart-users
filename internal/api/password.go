@@ -19,6 +19,10 @@ import (
 // before it is used.
 const refreshMargin = 30 * time.Second
 
+// ownPasswordTimeout bounds a self-service change's calls to the provider and
+// Stalwart together.
+const ownPasswordTimeout = 15 * time.Second
+
 // passwordsStore sets a password through the admin API.
 type passwordsStore interface {
 	SetPassword(name, password string) error
@@ -44,6 +48,8 @@ type passwordHandler struct {
 	refresher tokenRefresher
 	stalwart  ownPasswordChanger
 	now       func() time.Time
+	// timeout bounds changeOwn's outbound calls; zero means ownPasswordTimeout.
+	timeout time.Duration
 }
 
 func ChangePasswordHandler(store *directory.Store, tokens *auth.TokenStore, refresher *oidc.Client, client *stalwart.Client) http.HandlerFunc {
@@ -95,7 +101,12 @@ func (h *passwordHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // changeOwn changes the signed-in user's password as that user, so Stalwart
 // checks the current password and 2FA code itself.
 func (h *passwordHandler) changeOwn(w http.ResponseWriter, r *http.Request, req model.ChangePasswordRequest) {
-	ctx := r.Context()
+	timeout := h.timeout
+	if timeout <= 0 {
+		timeout = ownPasswordTimeout
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), timeout)
+	defer cancel()
 	sessionID := auth.SessionIDFromContext(ctx)
 
 	tokens, ok := h.tokens.Get(sessionID)
@@ -133,14 +144,14 @@ func (h *passwordHandler) changeOwn(w http.ResponseWriter, r *http.Request, req 
 	case errors.Is(err, stalwart.ErrOTPRequired):
 		writeError(w, http.StatusBadRequest, "otp_required")
 	case errors.Is(err, stalwart.ErrPasswordChangeNotAllowed):
-		log.Printf("password change for %s refused: %v", auth.CanonicalName(r.PathValue("name")), err)
+		log.Printf("password change for %s refused: %q", auth.CanonicalName(r.PathValue("name")), err)
 		writeError(w, http.StatusForbidden, "password change not allowed")
 	case errors.As(err, &invalid):
 		writeError(w, http.StatusBadRequest, invalid.Description)
 	default:
 		// Client errors carry method names, statuses and Stalwart's answer,
 		// never the request's secrets.
-		log.Printf("password change for %s failed: %v", auth.CanonicalName(r.PathValue("name")), err)
+		log.Printf("password change for %s failed: %q", auth.CanonicalName(r.PathValue("name")), err)
 		writeError(w, http.StatusInternalServerError, "internal error")
 	}
 }
@@ -155,7 +166,7 @@ func (h *passwordHandler) refresh(ctx context.Context, sessionID string, tokens 
 	fresh, err := h.refresher.Refresh(ctx, tokens.RefreshToken)
 	if err != nil {
 		// oidc errors carry only the HTTP status and OAuth error code.
-		log.Printf("token refresh failed: %v", err)
+		log.Printf("token refresh failed: %q", err)
 		return oidc.Tokens{}, false
 	}
 	h.tokens.Put(sessionID, fresh)

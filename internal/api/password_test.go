@@ -69,10 +69,16 @@ type ownPasswordCall struct{ accessToken, current, next, otpCode string }
 type fakeOwnPassword struct {
 	errs  []error // returned in order; nil once exhausted
 	calls []ownPasswordCall
+	// blockUntilDone makes the call wait for its context, like a hung Stalwart.
+	blockUntilDone bool
 }
 
-func (f *fakeOwnPassword) ChangeOwnPassword(_ context.Context, accessToken, current, next, otpCode string) error {
+func (f *fakeOwnPassword) ChangeOwnPassword(ctx context.Context, accessToken, current, next, otpCode string) error {
 	f.calls = append(f.calls, ownPasswordCall{accessToken, current, next, otpCode})
+	if f.blockUntilDone {
+		<-ctx.Done()
+		return ctx.Err()
+	}
 	if len(f.errs) == 0 {
 		return nil
 	}
@@ -93,6 +99,8 @@ type passwordFixture struct {
 	domains []string
 	// sessionID is the id of the last request's session.
 	sessionID string
+	// timeout is the handler's outbound-call timeout; zero keeps the default.
+	timeout time.Duration
 }
 
 func newPasswordFixture() *passwordFixture {
@@ -135,6 +143,7 @@ func (f *passwordFixture) serve(t *testing.T, username string, isAdmin bool, nam
 		refresher: f.refresher,
 		stalwart:  f.stalwart,
 		now:       func() time.Time { return passwordTestNow },
+		timeout:   f.timeout,
 	}
 	rr := httptest.NewRecorder()
 	manager.Middleware(h).ServeHTTP(rr, req)
@@ -367,6 +376,23 @@ func TestChangeOwnPasswordMapsStalwartErrors(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestChangeOwnPasswordTimesOutWhenStalwartHangs(t *testing.T) {
+	t.Parallel()
+
+	f := newPasswordFixture()
+	f.stored = freshTokens()
+	f.stalwart.blockUntilDone = true
+	f.timeout = 50 * time.Millisecond
+
+	start := time.Now()
+	rr := f.serve(t, "alice@erinko.fi", false, "alice@erinko.fi", selfChangeBody)
+
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
+		t.Fatalf("handler took %v, want it to give up after the timeout", elapsed)
+	}
+	assertError(t, rr, http.StatusInternalServerError, "internal error")
 }
 
 func TestChangeOwnPasswordRequiresCurrentPassword(t *testing.T) {

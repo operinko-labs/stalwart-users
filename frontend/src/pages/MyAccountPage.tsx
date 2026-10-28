@@ -101,7 +101,7 @@ export default function MyAccountPage() {
         } catch {
           // The session is dropped locally either way.
         }
-        navigate('/login', { replace: true })
+        navigate('/login?error=reauth', { replace: true })
         return
       }
       if (err instanceof ApiError && err.status === 400 && err.code === 'otp_required') {

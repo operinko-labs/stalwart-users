@@ -58,7 +58,7 @@ func LoginStartHandler(oc oidcStarter, tokens *TokenManager) http.HandlerFunc {
 		}
 		target, err := oc.AuthCodeURL(r.Context(), state, challenge)
 		if err != nil {
-			log.Printf("oidc login: %v", err)
+			log.Printf("oidc login: %q", err)
 			tokens.redirectToApp(w, r, "/login?error=signin")
 			return
 		}
@@ -99,13 +99,13 @@ func CallbackHandler(oc oidcFinisher, accounts accountResolver, tokens *TokenMan
 
 		oauthTokens, err := oc.Exchange(ctx, code, verifier)
 		if err != nil {
-			log.Printf("oidc callback: %v", err)
+			log.Printf("oidc callback: %q", err)
 			tokens.redirectToApp(w, r, "/login?error=signin")
 			return
 		}
 		info, err := oc.UserInfo(ctx, oauthTokens.AccessToken)
 		if err != nil {
-			log.Printf("oidc callback: %v", err)
+			log.Printf("oidc callback: %q", err)
 			tokens.redirectToApp(w, r, "/login?error=signin")
 			return
 		}
@@ -117,7 +117,7 @@ func CallbackHandler(oc oidcFinisher, accounts accountResolver, tokens *TokenMan
 		}
 		account, err := accounts.GetAccount(email)
 		if err != nil {
-			log.Printf("oidc callback: account lookup: %v", err)
+			log.Printf("oidc callback: account lookup: %q", err)
 			tokens.redirectToApp(w, r, "/login?error=signin")
 			return
 		}
@@ -127,14 +127,14 @@ func CallbackHandler(oc oidcFinisher, accounts accountResolver, tokens *TokenMan
 		}
 		isAdmin, err := accounts.IsAdmin(email)
 		if err != nil {
-			log.Printf("oidc callback: admin lookup: %v", err)
+			log.Printf("oidc callback: admin lookup: %q", err)
 			tokens.redirectToApp(w, r, "/login?error=signin")
 			return
 		}
 
 		session, sessionID, err := tokens.GenerateToken(email, isAdmin)
 		if err != nil {
-			log.Printf("oidc callback: %v", err)
+			log.Printf("oidc callback: %q", err)
 			tokens.redirectToApp(w, r, "/login?error=signin")
 			return
 		}

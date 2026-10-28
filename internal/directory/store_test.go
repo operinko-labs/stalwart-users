@@ -4,14 +4,17 @@ import (
 	"context"
 	"errors"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/operinko-labs/stalwart-users/internal/db"
+	"github.com/operinko-labs/stalwart-users/internal/model"
 	"github.com/operinko-labs/stalwart-users/internal/stalwart"
 )
 
 type fakeClient struct {
 	accounts []stalwart.Account
+	domains  []stalwart.Domain
 
 	created struct {
 		name, password, description string
@@ -26,6 +29,10 @@ type fakeClient struct {
 
 func (f *fakeClient) ListAccounts(context.Context) ([]stalwart.Account, error) {
 	return f.accounts, nil
+}
+
+func (f *fakeClient) ListDomains(context.Context) ([]stalwart.Domain, error) {
+	return f.domains, nil
 }
 
 func (f *fakeClient) CreateAccount(_ context.Context, name, password, description string, quota int64) error {
@@ -66,10 +73,18 @@ func (f *fakeAdmins) DeleteAdminDomains(name string) error {
 
 func newStore() (*Store, *fakeClient, *fakeAdmins) {
 	client := &fakeClient{accounts: []stalwart.Account{
-		{ID: "a1", Type: "User", Name: "dora", Email: "Dora@client.fi", Description: "Dora D", DiskQuota: 1024},
-		{ID: "a2", Type: "User", Name: "root", Email: "root@vaderrp.com", IsAdmin: true},
+		{
+			ID: "a1", Type: "User", Name: "dora", Email: "Dora@client.fi", Description: "Dora D", DiskQuota: 1024,
+			Aliases: map[string]stalwart.Alias{
+				"0": {Name: "sales", DomainID: "j"},
+				"3": {Name: "hello", DomainID: "v"},
+			},
+			MemberGroupIDs: []string{"g1"},
+		},
+		{ID: "a2", Type: "User", Name: "root", Email: "root@vaderrp.com", IsAdmin: true, Aliases: map[string]stalwart.Alias{"0": {Name: "postmaster", DomainID: "v"}}},
 		{ID: "g1", Type: "Group", Name: "team", Email: "team@client.fi"},
-	}}
+		{ID: "g2", Type: "Group", Name: "staff", Email: "staff@client.fi"},
+	}, domains: []stalwart.Domain{{ID: "j", Name: "client.fi"}, {ID: "v", Name: "vaderrp.com"}}}
 	admins := &fakeAdmins{}
 	return New(client, admins), client, admins
 }
@@ -251,5 +266,261 @@ func TestAdminDomainsDelegate(t *testing.T) {
 	}
 	if err := store.SetAdminDomains("dora@client.fi", []string{"a.fi"}); err != nil || !reflect.DeepEqual(admins.set["dora@client.fi"], []string{"a.fi"}) {
 		t.Fatalf("SetAdminDomains() err = %v, set = %v", err, admins.set)
+	}
+}
+
+func TestListEmailsPrimaryFirst(t *testing.T) {
+	t.Parallel()
+
+	store, _, _ := newStore()
+	got, err := store.ListEmails("dora@client.fi")
+	if err != nil {
+		t.Fatalf("ListEmails() error = %v", err)
+	}
+	want := []model.Email{
+		{Name: "Dora@client.fi", Address: "Dora@client.fi", Type: "primary"},
+		{Name: "Dora@client.fi", Address: "hello@vaderrp.com", Type: "alias"},
+		{Name: "Dora@client.fi", Address: "sales@client.fi", Type: "alias"},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("ListEmails() = %#v, want %#v", got, want)
+	}
+}
+
+func TestListEmailsUnknownAccount(t *testing.T) {
+	t.Parallel()
+
+	store, _, _ := newStore()
+	if _, err := store.ListEmails("nobody@client.fi"); !errors.Is(err, db.ErrAccountNotFound) {
+		t.Fatalf("err = %v, want ErrAccountNotFound", err)
+	}
+}
+
+func TestInsertEmailAddsAlias(t *testing.T) {
+	t.Parallel()
+
+	store, client, _ := newStore()
+	if err := store.InsertEmail("dora@client.fi", "info@CLIENT.fi", "alias"); err != nil {
+		t.Fatalf("InsertEmail() error = %v", err)
+	}
+	want := map[string]any{"aliases/4": map[string]any{"enable": true, "name": "info", "domainId": "j", "description": nil}}
+	if client.updatedID != "a1" || !reflect.DeepEqual(client.patch, want) {
+		t.Fatalf("id = %q, patch = %#v, want %#v", client.updatedID, client.patch, want)
+	}
+}
+
+func TestInsertEmailFirstAliasKeyIsZero(t *testing.T) {
+	t.Parallel()
+
+	store, client, _ := newStore()
+	client.accounts[0].Aliases = nil
+	if err := store.InsertEmail("dora@client.fi", "info@client.fi", ""); err != nil {
+		t.Fatalf("InsertEmail() error = %v", err)
+	}
+	if _, ok := client.patch["aliases/0"]; !ok {
+		t.Fatalf("patch = %#v, want aliases/0", client.patch)
+	}
+}
+
+func TestInsertEmailUnknownDomain(t *testing.T) {
+	t.Parallel()
+
+	store, client, _ := newStore()
+	err := store.InsertEmail("dora@client.fi", "info@elsewhere.org", "alias")
+	if !errors.Is(err, ErrUnsupported) || !strings.Contains(err.Error(), "elsewhere.org") {
+		t.Fatalf("err = %v, want ErrUnsupported naming the domain", err)
+	}
+	if client.updateCalls != 0 {
+		t.Fatal("client.UpdateAccount called")
+	}
+}
+
+func TestInsertEmailUnsupportedType(t *testing.T) {
+	t.Parallel()
+
+	store, client, _ := newStore()
+	if err := store.InsertEmail("dora@client.fi", "info@client.fi", "primary"); !errors.Is(err, ErrUnsupported) {
+		t.Fatalf("err = %v, want ErrUnsupported", err)
+	}
+	if client.updateCalls != 0 {
+		t.Fatal("client.UpdateAccount called")
+	}
+}
+
+func TestInsertEmailInUse(t *testing.T) {
+	t.Parallel()
+
+	store, client, _ := newStore()
+	for _, address := range []string{"POSTMASTER@vaderrp.com", "root@vaderrp.com", "team@client.fi", "sales@client.fi"} {
+		if err := store.InsertEmail("dora@client.fi", address, "alias"); !errors.Is(err, ErrAddressInUse) {
+			t.Fatalf("InsertEmail(%q) err = %v, want ErrAddressInUse", address, err)
+		}
+	}
+	if client.updateCalls != 0 {
+		t.Fatal("client.UpdateAccount called")
+	}
+}
+
+func TestInsertEmailUnknownAccount(t *testing.T) {
+	t.Parallel()
+
+	store, _, _ := newStore()
+	if err := store.InsertEmail("nobody@client.fi", "info@client.fi", "alias"); !errors.Is(err, db.ErrAccountNotFound) {
+		t.Fatalf("err = %v, want ErrAccountNotFound", err)
+	}
+}
+
+func TestGetEmailType(t *testing.T) {
+	t.Parallel()
+
+	store, _, _ := newStore()
+	for address, want := range map[string]string{
+		"dora@client.fi":    "primary",
+		"SALES@client.fi":   "alias",
+		"root@vaderrp.com":  "",
+		"unknown@client.fi": "",
+	} {
+		got, err := store.GetEmailType("dora@client.fi", address)
+		if err != nil || got != want {
+			t.Fatalf("GetEmailType(%q) = %q, %v; want %q", address, got, err, want)
+		}
+	}
+}
+
+func TestDeleteEmailRemovesAlias(t *testing.T) {
+	t.Parallel()
+
+	store, client, _ := newStore()
+	if err := store.DeleteEmail("dora@client.fi", "Hello@vaderrp.com"); err != nil {
+		t.Fatalf("DeleteEmail() error = %v", err)
+	}
+	if client.updatedID != "a1" || !reflect.DeepEqual(client.patch, map[string]any{"aliases/3": nil}) {
+		t.Fatalf("id = %q, patch = %#v", client.updatedID, client.patch)
+	}
+}
+
+func TestDeleteEmailPrimaryUnsupported(t *testing.T) {
+	t.Parallel()
+
+	store, client, _ := newStore()
+	if err := store.DeleteEmail("dora@client.fi", "dora@client.fi"); !errors.Is(err, ErrUnsupported) {
+		t.Fatalf("err = %v, want ErrUnsupported", err)
+	}
+	if client.updateCalls != 0 {
+		t.Fatal("client.UpdateAccount called")
+	}
+}
+
+func TestDeleteEmailAbsentIsNoop(t *testing.T) {
+	t.Parallel()
+
+	store, client, _ := newStore()
+	if err := store.DeleteEmail("dora@client.fi", "nothing@client.fi"); err != nil {
+		t.Fatalf("DeleteEmail() error = %v", err)
+	}
+	if client.updateCalls != 0 {
+		t.Fatal("client.UpdateAccount called")
+	}
+}
+
+func TestAddressInUseCaseInsensitive(t *testing.T) {
+	t.Parallel()
+
+	store, _, _ := newStore()
+	for address, want := range map[string]bool{
+		"DORA@client.fi":         true,
+		"Postmaster@VADERRP.com": true,
+		"team@client.fi":         true,
+		"free@client.fi":         false,
+	} {
+		got, err := store.AddressInUse(address)
+		if err != nil || got != want {
+			t.Fatalf("AddressInUse(%q) = %v, %v; want %v", address, got, err, want)
+		}
+	}
+}
+
+func TestListGroupsMapsIDsToAddresses(t *testing.T) {
+	t.Parallel()
+
+	store, client, _ := newStore()
+	client.accounts[0].MemberGroupIDs = []string{"g2", "g1", "gone"}
+	got, err := store.ListGroups("dora@client.fi")
+	if err != nil || !reflect.DeepEqual(got, []string{"staff@client.fi", "team@client.fi"}) {
+		t.Fatalf("ListGroups() = %v, %v", got, err)
+	}
+}
+
+func TestListGroupsUnknownAccount(t *testing.T) {
+	t.Parallel()
+
+	store, _, _ := newStore()
+	if _, err := store.ListGroups("nobody@client.fi"); !errors.Is(err, db.ErrAccountNotFound) {
+		t.Fatalf("err = %v, want ErrAccountNotFound", err)
+	}
+}
+
+func TestAddGroup(t *testing.T) {
+	t.Parallel()
+
+	store, client, _ := newStore()
+	if err := store.AddGroup("dora@client.fi", "STAFF@client.fi"); err != nil {
+		t.Fatalf("AddGroup() error = %v", err)
+	}
+	if client.updatedID != "a1" || !reflect.DeepEqual(client.patch, map[string]any{"memberGroupIds/g2": true}) {
+		t.Fatalf("id = %q, patch = %#v", client.updatedID, client.patch)
+	}
+}
+
+func TestAddGroupAlreadyMember(t *testing.T) {
+	t.Parallel()
+
+	store, client, _ := newStore()
+	if err := store.AddGroup("dora@client.fi", "team@client.fi"); err != nil {
+		t.Fatalf("AddGroup() error = %v", err)
+	}
+	if client.updateCalls != 0 {
+		t.Fatal("client.UpdateAccount called")
+	}
+}
+
+func TestAddGroupUnknownGroup(t *testing.T) {
+	t.Parallel()
+
+	store, client, _ := newStore()
+	for _, group := range []string{"nogroup@client.fi", "root@vaderrp.com"} {
+		err := store.AddGroup("dora@client.fi", group)
+		if !errors.Is(err, ErrUnsupported) || !strings.Contains(err.Error(), group) {
+			t.Fatalf("AddGroup(%q) err = %v, want ErrUnsupported naming the group", group, err)
+		}
+	}
+	if client.updateCalls != 0 {
+		t.Fatal("client.UpdateAccount called")
+	}
+}
+
+func TestRemoveGroup(t *testing.T) {
+	t.Parallel()
+
+	store, client, _ := newStore()
+	if err := store.RemoveGroup("dora@client.fi", "Team@client.fi"); err != nil {
+		t.Fatalf("RemoveGroup() error = %v", err)
+	}
+	if client.updatedID != "a1" || !reflect.DeepEqual(client.patch, map[string]any{"memberGroupIds/g1": nil}) {
+		t.Fatalf("id = %q, patch = %#v", client.updatedID, client.patch)
+	}
+}
+
+func TestRemoveGroupMissing(t *testing.T) {
+	t.Parallel()
+
+	store, client, _ := newStore()
+	for _, group := range []string{"staff@client.fi", "nogroup@client.fi"} {
+		if err := store.RemoveGroup("dora@client.fi", group); !errors.Is(err, db.ErrGroupMembershipNotFound) {
+			t.Fatalf("RemoveGroup(%q) err = %v, want ErrGroupMembershipNotFound", group, err)
+		}
+	}
+	if client.updateCalls != 0 {
+		t.Fatal("client.UpdateAccount called")
 	}
 }

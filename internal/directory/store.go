@@ -7,6 +7,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
+	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -27,6 +30,7 @@ type jmapClient interface {
 	CreateAccount(ctx context.Context, name, password, description string, diskQuota int64) error
 	UpdateAccount(ctx context.Context, id string, patch map[string]any) error
 	DeleteAccount(ctx context.Context, name string) error
+	ListDomains(ctx context.Context) ([]stalwart.Domain, error)
 }
 
 type adminDomainsDB interface {
@@ -186,4 +190,308 @@ func toModel(account stalwart.Account) model.Account {
 		Active:      true,
 		IsAdmin:     account.IsAdmin,
 	}
+}
+
+// ErrAddressInUse means another account already owns the address; handlers map
+// it to 409.
+var ErrAddressInUse = errors.New("address already in use")
+
+// ListEmails returns the primary address first, then the aliases sorted by
+// address.
+func (s *Store) ListEmails(name string) ([]model.Email, error) {
+	account, aliases, err := s.findWithAliases(name)
+	if err != nil {
+		return nil, err
+	}
+
+	emails := []model.Email{{Name: account.Email, Address: account.Email, Type: "primary"}}
+	addresses := make([]string, 0, len(aliases))
+	for _, address := range aliases {
+		addresses = append(addresses, address)
+	}
+	sort.Strings(addresses)
+	for _, address := range addresses {
+		emails = append(emails, model.Email{Name: account.Email, Address: address, Type: "alias"})
+	}
+
+	return emails, nil
+}
+
+// InsertEmail adds an alias; Stalwart accounts have a single primary address.
+func (s *Store) InsertEmail(name, address, emailType string) error {
+	if emailType != "" && emailType != "alias" {
+		return fmt.Errorf("%w: only alias addresses can be added", ErrUnsupported)
+	}
+
+	localPart, domain, ok := strings.Cut(address, "@")
+	if !ok || localPart == "" || domain == "" {
+		return fmt.Errorf("%w: invalid address %q", ErrUnsupported, address)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), callTimeout)
+	defer cancel()
+
+	accounts, err := s.client.ListAccounts(ctx)
+	if err != nil {
+		return err
+	}
+	domains, err := s.client.ListDomains(ctx)
+	if err != nil {
+		return err
+	}
+
+	account := findUser(accounts, name)
+	if account == nil {
+		return db.ErrAccountNotFound
+	}
+
+	domainID := ""
+	for _, d := range domains {
+		if strings.EqualFold(d.Name, domain) {
+			domainID = d.ID
+			break
+		}
+	}
+	if domainID == "" {
+		return fmt.Errorf("%w: domain %s is not hosted here", ErrUnsupported, domain)
+	}
+
+	if addressInUse(accounts, domains, address) {
+		return ErrAddressInUse
+	}
+
+	next := 0
+	for key := range account.Aliases {
+		if n, err := strconv.Atoi(key); err == nil && n >= next {
+			next = n + 1
+		}
+	}
+
+	return s.client.UpdateAccount(ctx, account.ID, map[string]any{
+		"aliases/" + strconv.Itoa(next): map[string]any{
+			"enable":      true,
+			"name":        localPart,
+			"domainId":    domainID,
+			"description": nil,
+		},
+	})
+}
+
+// GetEmailType returns "primary", "alias", or "" when the address is not on the
+// account.
+func (s *Store) GetEmailType(name, address string) (string, error) {
+	account, aliases, err := s.findWithAliases(name)
+	if err != nil {
+		return "", err
+	}
+
+	if strings.EqualFold(account.Email, address) {
+		return "primary", nil
+	}
+	for _, alias := range aliases {
+		if strings.EqualFold(alias, address) {
+			return "alias", nil
+		}
+	}
+
+	return "", nil
+}
+
+// DeleteEmail removes an alias. An address that is not on the account is a
+// no-op; the primary address cannot be removed.
+func (s *Store) DeleteEmail(name, address string) error {
+	account, aliases, err := s.findWithAliases(name)
+	if err != nil {
+		return err
+	}
+
+	if strings.EqualFold(account.Email, address) {
+		return fmt.Errorf("%w: the primary address can not be removed", ErrUnsupported)
+	}
+	for key, alias := range aliases {
+		if strings.EqualFold(alias, address) {
+			ctx, cancel := context.WithTimeout(context.Background(), callTimeout)
+			defer cancel()
+
+			return s.client.UpdateAccount(ctx, account.ID, map[string]any{"aliases/" + key: nil})
+		}
+	}
+
+	return nil
+}
+
+// AddressInUse reports whether any account, user or group, has the address as
+// its primary address or an alias.
+func (s *Store) AddressInUse(address string) (bool, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), callTimeout)
+	defer cancel()
+
+	accounts, err := s.client.ListAccounts(ctx)
+	if err != nil {
+		return false, err
+	}
+	domains, err := s.client.ListDomains(ctx)
+	if err != nil {
+		return false, err
+	}
+
+	return addressInUse(accounts, domains, address), nil
+}
+
+// ListGroups returns the addresses of the groups the account belongs to, sorted.
+func (s *Store) ListGroups(name string) ([]string, error) {
+	accounts, err := s.listAccounts()
+	if err != nil {
+		return nil, err
+	}
+	account := findUser(accounts, name)
+	if account == nil {
+		return nil, db.ErrAccountNotFound
+	}
+
+	groups := []string{}
+	for _, id := range account.MemberGroupIDs {
+		for _, candidate := range accounts {
+			if candidate.Type == "Group" && candidate.ID == id {
+				groups = append(groups, candidate.Email)
+			}
+		}
+	}
+	sort.Strings(groups)
+
+	return groups, nil
+}
+
+// AddGroup adds the account to an existing group; already being a member is a
+// no-op.
+func (s *Store) AddGroup(name, memberOf string) error {
+	accounts, err := s.listAccounts()
+	if err != nil {
+		return err
+	}
+	account := findUser(accounts, name)
+	if account == nil {
+		return db.ErrAccountNotFound
+	}
+
+	group := findGroup(accounts, memberOf)
+	if group == nil {
+		return fmt.Errorf("%w: group %s does not exist", ErrUnsupported, memberOf)
+	}
+	if slices.Contains(account.MemberGroupIDs, group.ID) {
+		return nil
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), callTimeout)
+	defer cancel()
+
+	return s.client.UpdateAccount(ctx, account.ID, map[string]any{"memberGroupIds/" + group.ID: true})
+}
+
+func (s *Store) RemoveGroup(name, memberOf string) error {
+	accounts, err := s.listAccounts()
+	if err != nil {
+		return err
+	}
+	account := findUser(accounts, name)
+	if account == nil {
+		return db.ErrAccountNotFound
+	}
+
+	group := findGroup(accounts, memberOf)
+	if group == nil || !slices.Contains(account.MemberGroupIDs, group.ID) {
+		return db.ErrGroupMembershipNotFound
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), callTimeout)
+	defer cancel()
+
+	return s.client.UpdateAccount(ctx, account.ID, map[string]any{"memberGroupIds/" + group.ID: nil})
+}
+
+func (s *Store) listAccounts() ([]stalwart.Account, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), callTimeout)
+	defer cancel()
+
+	return s.client.ListAccounts(ctx)
+}
+
+// findWithAliases returns the user and its alias addresses keyed by alias key.
+func (s *Store) findWithAliases(name string) (*stalwart.Account, map[string]string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), callTimeout)
+	defer cancel()
+
+	accounts, err := s.client.ListAccounts(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+	account := findUser(accounts, name)
+	if account == nil {
+		return nil, nil, db.ErrAccountNotFound
+	}
+
+	domains, err := s.client.ListDomains(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	return account, aliasAddresses(*account, domainNames(domains)), nil
+}
+
+func findUser(accounts []stalwart.Account, name string) *stalwart.Account {
+	for i := range accounts {
+		if accounts[i].Type == "User" && strings.EqualFold(accounts[i].Email, name) {
+			return &accounts[i]
+		}
+	}
+
+	return nil
+}
+
+func findGroup(accounts []stalwart.Account, address string) *stalwart.Account {
+	for i := range accounts {
+		if accounts[i].Type == "Group" && strings.EqualFold(accounts[i].Email, address) {
+			return &accounts[i]
+		}
+	}
+
+	return nil
+}
+
+func domainNames(domains []stalwart.Domain) map[string]string {
+	names := make(map[string]string, len(domains))
+	for _, domain := range domains {
+		names[domain.ID] = domain.Name
+	}
+
+	return names
+}
+
+// aliasAddresses maps alias keys to full addresses, skipping aliases whose
+// domain is unknown.
+func aliasAddresses(account stalwart.Account, domains map[string]string) map[string]string {
+	addresses := make(map[string]string, len(account.Aliases))
+	for key, alias := range account.Aliases {
+		if domain, ok := domains[alias.DomainID]; ok {
+			addresses[key] = alias.Name + "@" + domain
+		}
+	}
+
+	return addresses
+}
+
+func addressInUse(accounts []stalwart.Account, domains []stalwart.Domain, address string) bool {
+	names := domainNames(domains)
+	for _, account := range accounts {
+		if strings.EqualFold(account.Email, address) {
+			return true
+		}
+		for _, alias := range aliasAddresses(account, names) {
+			if strings.EqualFold(alias, address) {
+				return true
+			}
+		}
+	}
+
+	return false
 }

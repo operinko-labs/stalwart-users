@@ -71,6 +71,14 @@ func (p *Pool) SetAdminDomains(name string, domains []string) error {
 	return tx.Commit()
 }
 
+func (p *Pool) DeleteAdminDomains(name string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	_, err := p.DB().ExecContext(ctx, `DELETE FROM directory.domain_admins WHERE name = $1`, name)
+	return err
+}
+
 func (p *Pool) IsAdmin(name string) (bool, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()

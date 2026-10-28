@@ -36,6 +36,22 @@ func TestEnsureDomainAdminsTableCreatesTable(t *testing.T) {
 	}
 }
 
+func TestDeleteAdminDomainsRemovesRows(t *testing.T) {
+	t.Parallel()
+
+	pool, mock := newMockPool(t)
+	mock.ExpectExec(regexp.QuoteMeta(`DELETE FROM directory.domain_admins WHERE name = $1`)).
+		WithArgs("dora@client.fi").
+		WillReturnResult(sqlmock.NewResult(0, 2))
+
+	if err := pool.DeleteAdminDomains("dora@client.fi"); err != nil {
+		t.Fatalf("DeleteAdminDomains() error = %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestListAdminDomainsReturnsDomains(t *testing.T) {
 	t.Parallel()
 

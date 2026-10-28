@@ -164,21 +164,12 @@ func (s *Store) SetAdminDomains(name string, domains []string) error {
 }
 
 func (s *Store) find(name string) (*stalwart.Account, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), callTimeout)
-	defer cancel()
-
-	accounts, err := s.client.ListAccounts(ctx)
+	accounts, err := s.listAccounts()
 	if err != nil {
 		return nil, err
 	}
 
-	for i := range accounts {
-		if accounts[i].Type == "User" && strings.EqualFold(accounts[i].Email, name) {
-			return &accounts[i], nil
-		}
-	}
-
-	return nil, nil
+	return findByType(accounts, "User", name), nil
 }
 
 func toModel(account stalwart.Account) model.Account {
@@ -240,7 +231,7 @@ func (s *Store) InsertEmail(name, address, emailType string) error {
 		return err
 	}
 
-	account := findUser(accounts, name)
+	account := findByType(accounts, "User", name)
 	if account == nil {
 		return db.ErrAccountNotFound
 	}
@@ -344,7 +335,7 @@ func (s *Store) ListGroups(name string) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	account := findUser(accounts, name)
+	account := findByType(accounts, "User", name)
 	if account == nil {
 		return nil, db.ErrAccountNotFound
 	}
@@ -369,12 +360,12 @@ func (s *Store) AddGroup(name, memberOf string) error {
 	if err != nil {
 		return err
 	}
-	account := findUser(accounts, name)
+	account := findByType(accounts, "User", name)
 	if account == nil {
 		return db.ErrAccountNotFound
 	}
 
-	group := findGroup(accounts, memberOf)
+	group := findByType(accounts, "Group", memberOf)
 	if group == nil {
 		return fmt.Errorf("%w: group %s does not exist", ErrUnsupported, memberOf)
 	}
@@ -393,12 +384,12 @@ func (s *Store) RemoveGroup(name, memberOf string) error {
 	if err != nil {
 		return err
 	}
-	account := findUser(accounts, name)
+	account := findByType(accounts, "User", name)
 	if account == nil {
 		return db.ErrAccountNotFound
 	}
 
-	group := findGroup(accounts, memberOf)
+	group := findByType(accounts, "Group", memberOf)
 	if group == nil || !slices.Contains(account.MemberGroupIDs, group.ID) {
 		return db.ErrGroupMembershipNotFound
 	}
@@ -425,7 +416,7 @@ func (s *Store) findWithAliases(name string) (*stalwart.Account, map[string]stri
 	if err != nil {
 		return nil, nil, err
 	}
-	account := findUser(accounts, name)
+	account := findByType(accounts, "User", name)
 	if account == nil {
 		return nil, nil, db.ErrAccountNotFound
 	}
@@ -438,19 +429,11 @@ func (s *Store) findWithAliases(name string) (*stalwart.Account, map[string]stri
 	return account, aliasAddresses(*account, domainNames(domains)), nil
 }
 
-func findUser(accounts []stalwart.Account, name string) *stalwart.Account {
+// findByType matches the primary address case-insensitively among accounts of
+// one Stalwart type ("User" or "Group"); nil when there is none.
+func findByType(accounts []stalwart.Account, accountType, address string) *stalwart.Account {
 	for i := range accounts {
-		if accounts[i].Type == "User" && strings.EqualFold(accounts[i].Email, name) {
-			return &accounts[i]
-		}
-	}
-
-	return nil
-}
-
-func findGroup(accounts []stalwart.Account, address string) *stalwart.Account {
-	for i := range accounts {
-		if accounts[i].Type == "Group" && strings.EqualFold(accounts[i].Email, address) {
+		if accounts[i].Type == accountType && strings.EqualFold(accounts[i].Email, address) {
 			return &accounts[i]
 		}
 	}

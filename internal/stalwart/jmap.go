@@ -8,6 +8,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"sort"
 	"strings"
 )
 
@@ -53,6 +54,48 @@ type jmapSetResponse struct {
 
 type jmapCreatedObject struct {
 	ID string `json:"id"`
+}
+
+type Alias struct{ Name, DomainID string }
+
+type Account struct {
+	ID, Type, Name, DomainID, Email, Description string           // Type: "User" | "Group"
+	Aliases                                      map[string]Alias // keyed by Stalwart list key
+	IsAdmin                                      bool             // roles["@type"] == "Admin"
+	DiskQuota                                    int64            // quotas["maxDiskQuota"], 0 if absent
+	MemberGroupIDs                               []string
+	PasswordKey                                  string // list key of the Password credential, "" if none
+}
+
+type Domain struct{ ID, Name string }
+
+type jmapAccountObject struct {
+	ID           string `json:"id"`
+	Type         string `json:"@type"`
+	Name         string `json:"name"`
+	DomainID     string `json:"domainId"`
+	EmailAddress string `json:"emailAddress"`
+	Description  string `json:"description"`
+	Roles        struct {
+		Type string `json:"@type"`
+	} `json:"roles"`
+	Quotas  map[string]any `json:"quotas"`
+	Aliases map[string]struct {
+		Name     string `json:"name"`
+		DomainID string `json:"domainId"`
+	} `json:"aliases"`
+	MemberGroupIDs map[string]bool `json:"memberGroupIds"`
+	Credentials    map[string]struct {
+		Type string `json:"@type"`
+	} `json:"credentials"`
+}
+
+type jmapAccountGetResponse struct {
+	List []jmapAccountObject `json:"list"`
+}
+
+type jmapDomainGetResponse struct {
+	List []Domain `json:"list"`
 }
 
 func NewClient(baseURL, adminToken string) *Client {
@@ -140,6 +183,82 @@ func (c *Client) DeleteAccount(ctx context.Context, name string) error {
 	}
 
 	return nil
+}
+
+func (c *Client) ListAccounts(ctx context.Context) ([]Account, error) {
+	var response jmapAccountGetResponse
+	if err := c.call(ctx, "x:Account/get", map[string]any{"ids": nil}, &response); err != nil {
+		return nil, fmt.Errorf("list accounts: %w", err)
+	}
+
+	accounts := make([]Account, 0, len(response.List))
+	for _, object := range response.List {
+		account := Account{
+			ID:          object.ID,
+			Type:        object.Type,
+			Name:        object.Name,
+			DomainID:    object.DomainID,
+			Email:       object.EmailAddress,
+			Description: object.Description,
+			Aliases:     make(map[string]Alias, len(object.Aliases)),
+			IsAdmin:     object.Roles.Type == "Admin",
+		}
+		if quota, ok := object.Quotas["maxDiskQuota"].(float64); ok {
+			account.DiskQuota = int64(quota)
+		}
+		for key, alias := range object.Aliases {
+			account.Aliases[key] = Alias{Name: alias.Name, DomainID: alias.DomainID}
+		}
+		for groupID := range object.MemberGroupIDs {
+			account.MemberGroupIDs = append(account.MemberGroupIDs, groupID)
+		}
+		sort.Strings(account.MemberGroupIDs)
+		for key, credential := range object.Credentials {
+			if credential.Type == "Password" && (account.PasswordKey == "" || key < account.PasswordKey) {
+				account.PasswordKey = key
+			}
+		}
+		accounts = append(accounts, account)
+	}
+
+	return accounts, nil
+}
+
+func (c *Client) ListDomains(ctx context.Context) ([]Domain, error) {
+	var response jmapDomainGetResponse
+	if err := c.call(ctx, "x:Domain/get", map[string]any{
+		"ids":        nil,
+		"properties": []string{"name"},
+	}, &response); err != nil {
+		return nil, fmt.Errorf("list domains: %w", err)
+	}
+
+	return response.List, nil
+}
+
+// Authenticate checks a user's credentials against Stalwart's JMAP session
+// endpoint. It deliberately does not send the admin bearer token.
+func (c *Client) Authenticate(ctx context.Context, username, password string) (bool, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/jmap/session", nil)
+	if err != nil {
+		return false, fmt.Errorf("build authenticate request: %w", err)
+	}
+	req.SetBasicAuth(username, password)
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return false, fmt.Errorf("send authenticate request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	switch resp.StatusCode {
+	case http.StatusOK:
+		return true, nil
+	case http.StatusUnauthorized:
+		return false, nil
+	default:
+		return false, fmt.Errorf("authenticate request failed with status %d", resp.StatusCode)
+	}
 }
 
 func (c *Client) queryDomainID(ctx context.Context, domain string) (string, error) {

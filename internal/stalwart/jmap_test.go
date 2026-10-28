@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -230,4 +231,172 @@ func decodeTestMethodCall(t *testing.T, call testJMAPMethodCall) (string, map[st
 	}
 
 	return method, args
+}
+
+func TestListAccountsMapsFields(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assertJMAPRequest(t, r)
+
+		method, args := decodeTestMethodCall(t, decodeTestJMAPRequest(t, r).MethodCalls[0])
+		if method != "x:Account/get" {
+			t.Fatalf("method = %q, want x:Account/get", method)
+		}
+		if ids, ok := args["ids"]; !ok || ids != nil {
+			t.Fatalf("ids = %#v, want explicit null", args["ids"])
+		}
+
+		_, _ = w.Write([]byte(`{"methodResponses":[["x:Account/get",{"accountId":"d333333","list":[
+			{"id":"cv","@type":"User","name":"olli","domainId":"h","emailAddress":"olli@erinko.fi","description":"Olli",
+			 "roles":{"@type":"Admin"},"permissions":{"@type":"Inherit"},"quotas":{"maxDiskQuota":1048576},
+			 "aliases":{"0":{"enable":true,"name":"olli","domainId":"d","description":null},"1":{"enable":true,"name":"olli","domainId":"b","description":null}},
+			 "memberGroupIds":{"g1":true},
+			 "credentials":{"0":{"credentialId":"a","expiresAt":null,"allowedIps":{},"@type":"Password"},"1":{"credentialId":"c","description":"Stalwart Admin API","@type":"ApiKey"}},
+			 "locale":"fi-FI"},
+			{"id":"g1","@type":"Group","name":"staff","domainId":"h","emailAddress":"staff@erinko.fi","roles":{"@type":"User"},"quotas":{},"aliases":{},"memberGroupIds":{},"credentials":{}}
+		],"notFound":[]},"c1"]]}`))
+	}))
+	defer server.Close()
+
+	client := NewClient(server.URL, "test-token")
+	client.httpClient = server.Client()
+
+	accounts, err := client.ListAccounts(context.Background())
+	if err != nil {
+		t.Fatalf("ListAccounts() error = %v", err)
+	}
+	if len(accounts) != 2 {
+		t.Fatalf("accounts len = %d, want 2", len(accounts))
+	}
+
+	olli := accounts[0]
+	if olli.ID != "cv" || olli.Type != "User" || olli.Name != "olli" || olli.DomainID != "h" ||
+		olli.Email != "olli@erinko.fi" || olli.Description != "Olli" {
+		t.Fatalf("account = %#v, want olli fields mapped", olli)
+	}
+	if !olli.IsAdmin {
+		t.Fatal("IsAdmin = false, want true")
+	}
+	if olli.DiskQuota != 1048576 {
+		t.Fatalf("DiskQuota = %d, want 1048576", olli.DiskQuota)
+	}
+	if olli.PasswordKey != "0" {
+		t.Fatalf("PasswordKey = %q, want 0", olli.PasswordKey)
+	}
+	if len(olli.Aliases) != 2 || olli.Aliases["0"] != (Alias{Name: "olli", DomainID: "d"}) || olli.Aliases["1"] != (Alias{Name: "olli", DomainID: "b"}) {
+		t.Fatalf("Aliases = %#v, want two aliases keyed by list key", olli.Aliases)
+	}
+	if len(olli.MemberGroupIDs) != 1 || olli.MemberGroupIDs[0] != "g1" {
+		t.Fatalf("MemberGroupIDs = %#v, want [g1]", olli.MemberGroupIDs)
+	}
+
+	group := accounts[1]
+	if group.Type != "Group" || group.IsAdmin || group.DiskQuota != 0 {
+		t.Fatalf("group = %#v, want non-admin Group without quota", group)
+	}
+}
+
+func TestListAccountsNoPassword(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assertJMAPRequest(t, r)
+		_, _ = w.Write([]byte(`{"methodResponses":[["x:Account/get",{"accountId":"d333333","list":[
+			{"id":"u1","@type":"User","name":"bob","domainId":"h","emailAddress":"bob@erinko.fi","roles":{"@type":"User"},"quotas":{},"aliases":{},"memberGroupIds":{},"credentials":{}}
+		],"notFound":[]},"c1"]]}`))
+	}))
+	defer server.Close()
+
+	client := NewClient(server.URL, "test-token")
+	client.httpClient = server.Client()
+
+	accounts, err := client.ListAccounts(context.Background())
+	if err != nil {
+		t.Fatalf("ListAccounts() error = %v", err)
+	}
+	if len(accounts) != 1 || accounts[0].PasswordKey != "" {
+		t.Fatalf("accounts = %#v, want one account with empty PasswordKey", accounts)
+	}
+}
+
+func TestListDomains(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assertJMAPRequest(t, r)
+
+		method, args := decodeTestMethodCall(t, decodeTestJMAPRequest(t, r).MethodCalls[0])
+		if method != "x:Domain/get" {
+			t.Fatalf("method = %q, want x:Domain/get", method)
+		}
+		if ids, ok := args["ids"]; !ok || ids != nil {
+			t.Fatalf("ids = %#v, want explicit null", args["ids"])
+		}
+		properties, _ := args["properties"].([]any)
+		if len(properties) != 1 || properties[0] != "name" {
+			t.Fatalf("properties = %#v, want [name]", args["properties"])
+		}
+
+		_, _ = w.Write([]byte(`{"methodResponses":[["x:Domain/get",{"accountId":"d333333","list":[{"id":"h","name":"erinko.fi"},{"id":"d","name":"vaderrp.com"}],"notFound":[]},"c1"]]}`))
+	}))
+	defer server.Close()
+
+	client := NewClient(server.URL, "test-token")
+	client.httpClient = server.Client()
+
+	domains, err := client.ListDomains(context.Background())
+	if err != nil {
+		t.Fatalf("ListDomains() error = %v", err)
+	}
+	if len(domains) != 2 || domains[0] != (Domain{ID: "h", Name: "erinko.fi"}) || domains[1] != (Domain{ID: "d", Name: "vaderrp.com"}) {
+		t.Fatalf("domains = %#v, want erinko.fi and vaderrp.com", domains)
+	}
+}
+
+func TestAuthenticate(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		status  int
+		want    bool
+		wantErr bool
+	}{
+		{name: "valid", status: http.StatusOK, want: true},
+		{name: "invalid", status: http.StatusUnauthorized, want: false},
+		{name: "server error", status: http.StatusInternalServerError, wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != http.MethodGet || r.URL.Path != "/jmap/session" {
+					t.Fatalf("request = %s %s, want GET /jmap/session", r.Method, r.URL.Path)
+				}
+				user, pass, ok := r.BasicAuth()
+				if !ok || user != "olli@erinko.fi" || pass != "s3cret" {
+					t.Fatalf("basic auth = %q/%q/%v, want olli@erinko.fi/s3cret", user, pass, ok)
+				}
+				if got := r.Header.Get("Authorization"); strings.Contains(got, "Bearer") || !strings.HasPrefix(got, "Basic ") {
+					t.Fatalf("Authorization = %q, want Basic and no bearer token", got)
+				}
+				w.WriteHeader(tt.status)
+			}))
+			defer server.Close()
+
+			client := NewClient(server.URL, "test-token")
+			client.httpClient = server.Client()
+
+			got, err := client.Authenticate(context.Background(), "olli@erinko.fi", "s3cret")
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("Authenticate() error = %v, wantErr %v", err, tt.wantErr)
+			}
+			if got != tt.want {
+				t.Fatalf("Authenticate() = %v, want %v", got, tt.want)
+			}
+		})
+	}
 }

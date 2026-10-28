@@ -26,7 +26,7 @@ type accountsStore interface {
 }
 
 type stalwartClient interface {
-	CreateAccount(ctx context.Context, name, password, description string) error
+	CreateAccount(ctx context.Context, name, password, description string, diskQuota int64) error
 	DeleteAccount(ctx context.Context, name string) error
 }
 
@@ -145,7 +145,7 @@ func newCreateAccountHandler(store accountsStore, jmap stalwartClient) http.Hand
 		}
 
 		if jmap != nil {
-			if err := jmap.CreateAccount(r.Context(), req.Name, req.Password, req.Description); err != nil {
+			if err := jmap.CreateAccount(r.Context(), req.Name, req.Password, req.Description, int64(req.Quota)); err != nil {
 				log.Printf("Failed to create Stalwart account for %s: %v", req.Name, err)
 				writeError(w, http.StatusInternalServerError, err.Error())
 				return

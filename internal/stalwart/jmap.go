@@ -47,10 +47,19 @@ type jmapQueryResponse struct {
 
 type jmapSetResponse struct {
 	Created      map[string]jmapCreatedObject `json:"created"`
+	Updated      map[string]json.RawMessage   `json:"updated"`
 	Destroyed    []string                     `json:"destroyed"`
 	NotCreated   map[string]jmapError         `json:"notCreated"`
+	NotUpdated   map[string]jmapError         `json:"notUpdated"`
 	NotDestroyed map[string]jmapError         `json:"notDestroyed"`
 }
+
+// ErrInvalid wraps Stalwart's notCreated/notUpdated "invalidProperties" and
+// "invalidPatch" errors. Its Error() is Stalwart's description so handlers can
+// return it to the caller as a 400.
+type ErrInvalid struct{ Description string }
+
+func (e ErrInvalid) Error() string { return e.Description }
 
 type jmapCreatedObject struct {
 	ID string `json:"id"`
@@ -106,9 +115,9 @@ func NewClient(baseURL, adminToken string) *Client {
 	}
 }
 
-func (c *Client) CreateAccount(ctx context.Context, name, password, description string) error {
-	_ = password
-
+// CreateAccount creates a User account. password may be plaintext or a hash;
+// Stalwart decides which. A diskQuota of 0 leaves the quota unset.
+func (c *Client) CreateAccount(ctx context.Context, name, password, description string, diskQuota int64) error {
 	localPart, domain, err := splitAddress(name)
 	if err != nil {
 		return err
@@ -119,6 +128,11 @@ func (c *Client) CreateAccount(ctx context.Context, name, password, description 
 		return fmt.Errorf("create account %s: %w", name, err)
 	}
 
+	quotas := map[string]any{}
+	if diskQuota > 0 {
+		quotas["maxDiskQuota"] = diskQuota
+	}
+
 	var response jmapSetResponse
 	if err := c.call(ctx, "x:Account/set", map[string]any{
 		"create": map[string]any{
@@ -127,11 +141,11 @@ func (c *Client) CreateAccount(ctx context.Context, name, password, description 
 				"name":             localPart,
 				"domainId":         domainID,
 				"description":      description,
-				"credentials":      map[string]any{},
+				"credentials":      map[string]any{"0": passwordCredential(password)},
 				"memberGroupIds":   map[string]any{},
 				"roles":            map[string]any{"@type": "User"},
 				"permissions":      map[string]any{"@type": "Inherit"},
-				"quotas":           map[string]any{},
+				"quotas":           quotas,
 				"aliases":          map[string]any{},
 				"encryptionAtRest": map[string]any{"@type": "Disabled"},
 			},
@@ -149,6 +163,42 @@ func (c *Client) CreateAccount(ctx context.Context, name, password, description 
 	}
 
 	return nil
+}
+
+// UpdateAccount applies a JMAP patch (keys use "/" as the path separator, e.g.
+// "credentials/0/secret") to the account with the given Stalwart ID.
+func (c *Client) UpdateAccount(ctx context.Context, id string, patch map[string]any) error {
+	var response jmapSetResponse
+	if err := c.call(ctx, "x:Account/set", map[string]any{
+		"update": map[string]any{id: patch},
+	}, &response); err != nil {
+		return fmt.Errorf("update account %s: %w", id, err)
+	}
+
+	if len(response.NotUpdated) > 0 {
+		return fmt.Errorf("update account %s: %w", id, firstJMAPError(response.NotUpdated))
+	}
+
+	if _, ok := response.Updated[id]; !ok {
+		return fmt.Errorf("update account %s: account not in update response", id)
+	}
+
+	return nil
+}
+
+// SetPassword replaces the account's Password credential, or adds one at key 0
+// when the account has none.
+func (c *Client) SetPassword(ctx context.Context, account Account, secret string) error {
+	patch := map[string]any{"credentials/0": passwordCredential(secret)}
+	if account.PasswordKey != "" {
+		patch = map[string]any{"credentials/" + account.PasswordKey + "/secret": secret}
+	}
+
+	return c.UpdateAccount(ctx, account.ID, patch)
+}
+
+func passwordCredential(secret string) map[string]any {
+	return map[string]any{"@type": "Password", "secret": secret}
 }
 
 func (c *Client) DeleteAccount(ctx context.Context, name string) error {
@@ -376,6 +426,9 @@ func splitAddress(name string) (string, string, error) {
 
 func firstJMAPError(errs map[string]jmapError) error {
 	for _, err := range errs {
+		if err.Type == "invalidProperties" || err.Type == "invalidPatch" {
+			return ErrInvalid{Description: err.Description}
+		}
 		if err.Description != "" {
 			return fmt.Errorf("jmap error %s: %s", err.Type, err.Description)
 		}

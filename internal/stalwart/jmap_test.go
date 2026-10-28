@@ -3,6 +3,7 @@ package stalwart
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -47,8 +48,13 @@ func TestCreateAccountSuccess(t *testing.T) {
 				t.Fatalf("create payload = %#v, want alice/domain-1", new1)
 			}
 			credentials := new1["credentials"].(map[string]any)
-			if len(credentials) != 0 {
-				t.Fatalf("credentials = %#v, want empty object", credentials)
+			first, ok := credentials["0"].(map[string]any)
+			if len(credentials) != 1 || !ok || first["@type"] != "Password" || first["secret"] != "plaintext-password" {
+				t.Fatalf("credentials = %#v, want one Password credential at key 0", credentials)
+			}
+			quotas := new1["quotas"].(map[string]any)
+			if len(quotas) != 1 || quotas["maxDiskQuota"] != float64(5) {
+				t.Fatalf("quotas = %#v, want maxDiskQuota 5", quotas)
 			}
 			memberGroupIDs := new1["memberGroupIds"].(map[string]any)
 			if len(memberGroupIDs) != 0 {
@@ -68,7 +74,7 @@ func TestCreateAccountSuccess(t *testing.T) {
 	client := NewClient(server.URL, "test-token")
 	client.httpClient = server.Client()
 
-	if err := client.CreateAccount(context.Background(), "alice@vaderrp.com", "plaintext-password", "Alice User"); err != nil {
+	if err := client.CreateAccount(context.Background(), "alice@vaderrp.com", "plaintext-password", "Alice User", 5); err != nil {
 		t.Fatalf("CreateAccount() error = %v", err)
 	}
 	if requestCount != 2 {
@@ -140,7 +146,7 @@ func TestCreateAccountDomainNotFound(t *testing.T) {
 	client := NewClient(server.URL, "test-token")
 	client.httpClient = server.Client()
 
-	err := client.CreateAccount(context.Background(), "alice@vaderrp.com", "plaintext-password", "Alice User")
+	err := client.CreateAccount(context.Background(), "alice@vaderrp.com", "plaintext-password", "Alice User", 0)
 	if err == nil {
 		t.Fatal("CreateAccount() error = nil, want error")
 	}
@@ -398,5 +404,179 @@ func TestAuthenticate(t *testing.T) {
 				t.Fatalf("Authenticate() = %v, want %v", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestCreateAccountZeroQuotaSendsEmptyQuotas(t *testing.T) {
+	t.Parallel()
+
+	requestCount := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestCount++
+		assertJMAPRequest(t, r)
+		request := decodeTestJMAPRequest(t, r)
+		_, args := decodeTestMethodCall(t, request.MethodCalls[0])
+
+		if requestCount == 1 {
+			_, _ = w.Write([]byte(`{"methodResponses":[["x:Domain/query",{"ids":["domain-1"]},"c1"]]}`))
+			return
+		}
+		new1 := args["create"].(map[string]any)["new1"].(map[string]any)
+		quotas := new1["quotas"].(map[string]any)
+		if len(quotas) != 0 {
+			t.Fatalf("quotas = %#v, want empty object", quotas)
+		}
+		_, _ = w.Write([]byte(`{"methodResponses":[["x:Account/set",{"created":{"new1":{"id":"account-1"}}},"c1"]]}`))
+	}))
+	defer server.Close()
+
+	client := NewClient(server.URL, "test-token")
+	client.httpClient = server.Client()
+
+	if err := client.CreateAccount(context.Background(), "alice@vaderrp.com", "pw", "Alice", 0); err != nil {
+		t.Fatalf("CreateAccount() error = %v", err)
+	}
+}
+
+func TestCreateAccountInvalidPropertiesIsErrInvalid(t *testing.T) {
+	t.Parallel()
+
+	requestCount := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestCount++
+		if requestCount == 1 {
+			_, _ = w.Write([]byte(`{"methodResponses":[["x:Domain/query",{"ids":["domain-1"]},"c1"]]}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"methodResponses":[["x:Account/set",{"notCreated":{"new1":{"type":"invalidProperties","description":"Password is too weak","properties":["credentials/0/secret"]}}},"c1"]]}`))
+	}))
+	defer server.Close()
+
+	client := NewClient(server.URL, "test-token")
+	client.httpClient = server.Client()
+
+	err := client.CreateAccount(context.Background(), "alice@vaderrp.com", "pw", "Alice", 0)
+	var invalid ErrInvalid
+	if !errors.As(err, &invalid) {
+		t.Fatalf("CreateAccount() error = %v, want ErrInvalid", err)
+	}
+	if invalid.Description != "Password is too weak" {
+		t.Fatalf("Description = %q, want Password is too weak", invalid.Description)
+	}
+}
+
+func TestUpdateAccountPatch(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assertJMAPRequest(t, r)
+		request := decodeTestJMAPRequest(t, r)
+		method, args := decodeTestMethodCall(t, request.MethodCalls[0])
+		if method != "x:Account/set" {
+			t.Fatalf("method = %q, want x:Account/set", method)
+		}
+		patch := args["update"].(map[string]any)["cv"].(map[string]any)
+		if patch["description"] != "New" || patch["quotas/maxDiskQuota"] != float64(7) {
+			t.Fatalf("patch = %#v, want description and quota keys", patch)
+		}
+		_, _ = w.Write([]byte(`{"methodResponses":[["x:Account/set",{"accountId":"d333333","updated":{"cv":null}},"c1"]]}`))
+	}))
+	defer server.Close()
+
+	client := NewClient(server.URL, "test-token")
+	client.httpClient = server.Client()
+
+	err := client.UpdateAccount(context.Background(), "cv", map[string]any{"description": "New", "quotas/maxDiskQuota": 7})
+	if err != nil {
+		t.Fatalf("UpdateAccount() error = %v", err)
+	}
+}
+
+func TestSetPasswordPatchesExisting(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assertJMAPRequest(t, r)
+		request := decodeTestJMAPRequest(t, r)
+		_, args := decodeTestMethodCall(t, request.MethodCalls[0])
+		patch := args["update"].(map[string]any)["cv"].(map[string]any)
+		if len(patch) != 1 || patch["credentials/0/secret"] != "newpw" {
+			t.Fatalf("patch = %#v, want only credentials/0/secret", patch)
+		}
+		_, _ = w.Write([]byte(`{"methodResponses":[["x:Account/set",{"accountId":"d333333","updated":{"cv":null}},"c1"]]}`))
+	}))
+	defer server.Close()
+
+	client := NewClient(server.URL, "test-token")
+	client.httpClient = server.Client()
+
+	if err := client.SetPassword(context.Background(), Account{ID: "cv", PasswordKey: "0"}, "newpw"); err != nil {
+		t.Fatalf("SetPassword() error = %v", err)
+	}
+}
+
+func TestSetPasswordCreatesCredential(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assertJMAPRequest(t, r)
+		request := decodeTestJMAPRequest(t, r)
+		_, args := decodeTestMethodCall(t, request.MethodCalls[0])
+		patch := args["update"].(map[string]any)["cv"].(map[string]any)
+		credential, ok := patch["credentials/0"].(map[string]any)
+		if len(patch) != 1 || !ok || credential["@type"] != "Password" || credential["secret"] != "newpw" {
+			t.Fatalf("patch = %#v, want credentials/0 Password credential", patch)
+		}
+		_, _ = w.Write([]byte(`{"methodResponses":[["x:Account/set",{"accountId":"d333333","updated":{"cv":null}},"c1"]]}`))
+	}))
+	defer server.Close()
+
+	client := NewClient(server.URL, "test-token")
+	client.httpClient = server.Client()
+
+	if err := client.SetPassword(context.Background(), Account{ID: "cv"}, "newpw"); err != nil {
+		t.Fatalf("SetPassword() error = %v", err)
+	}
+}
+
+func TestSetPasswordInvalidProperties(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"methodResponses":[["x:Account/set",{"notUpdated":{"cv":{"type":"invalidProperties","description":"Password is too weak","properties":["credentials/0/secret"]}}},"c1"]]}`))
+	}))
+	defer server.Close()
+
+	client := NewClient(server.URL, "test-token")
+	client.httpClient = server.Client()
+
+	err := client.SetPassword(context.Background(), Account{ID: "cv", PasswordKey: "0"}, "x")
+	var invalid ErrInvalid
+	if !errors.As(err, &invalid) {
+		t.Fatalf("SetPassword() error = %v, want ErrInvalid", err)
+	}
+	if invalid.Description != "Password is too weak" || invalid.Error() != "Password is too weak" {
+		t.Fatalf("Description = %q, Error() = %q, want Password is too weak", invalid.Description, invalid.Error())
+	}
+}
+
+func TestUpdateAccountOtherFailureIsNotErrInvalid(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"methodResponses":[["x:Account/set",{"notUpdated":{"cv":{"type":"notFound"}}},"c1"]]}`))
+	}))
+	defer server.Close()
+
+	client := NewClient(server.URL, "test-token")
+	client.httpClient = server.Client()
+
+	err := client.UpdateAccount(context.Background(), "cv", map[string]any{"description": "x"})
+	if err == nil {
+		t.Fatal("UpdateAccount() error = nil, want error")
+	}
+	var invalid ErrInvalid
+	if errors.As(err, &invalid) {
+		t.Fatalf("error = %v, want not ErrInvalid", err)
 	}
 }

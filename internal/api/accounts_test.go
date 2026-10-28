@@ -117,7 +117,7 @@ type mockStalwartClient struct {
 	callOrder   *[]string
 }
 
-func (m *mockStalwartClient) CreateAccount(_ context.Context, name, password, description string) error {
+func (m *mockStalwartClient) CreateAccount(_ context.Context, name, password, description string, _ int64) error {
 	m.createCalls++
 	m.createdName = name
 	m.createdPass = password

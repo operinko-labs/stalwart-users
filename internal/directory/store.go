@@ -284,7 +284,7 @@ func (s *Store) InsertEmail(name, address, emailType string) error {
 
 	domainID := ""
 	for _, d := range domains {
-		if strings.EqualFold(d.Name, domain) {
+		if auth.CanonicalName(d.Name) == domain {
 			domainID = d.ID
 			break
 		}
@@ -325,11 +325,11 @@ func (s *Store) GetEmailType(name, address string) (string, error) {
 		return "", err
 	}
 
-	if strings.EqualFold(account.Email, address) {
+	if auth.CanonicalName(account.Email) == address {
 		return "primary", nil
 	}
 	for _, alias := range aliases {
-		if strings.EqualFold(alias, address) {
+		if auth.CanonicalName(alias) == address {
 			return "alias", nil
 		}
 	}
@@ -348,11 +348,11 @@ func (s *Store) DeleteEmail(name, address string) error {
 		return err
 	}
 
-	if strings.EqualFold(account.Email, address) {
+	if auth.CanonicalName(account.Email) == address {
 		return fmt.Errorf("%w: the primary address can not be removed", ErrUnsupported)
 	}
 	for key, alias := range aliases {
-		if strings.EqualFold(alias, address) {
+		if auth.CanonicalName(alias) == address {
 			ctx, cancel := context.WithTimeout(context.Background(), callTimeout)
 			defer cancel()
 
@@ -491,11 +491,14 @@ func (s *Store) findWithAliases(name string) (*stalwart.Account, map[string]stri
 	return account, aliasAddresses(*account, domainNames(domains)), nil
 }
 
-// findByType matches the primary address case-insensitively among accounts of
-// one Stalwart type ("User" or "Group"); nil when there is none.
+// findByType matches the canonical primary address among accounts of one
+// Stalwart type ("User" or "Group"); nil when there is none. Matching is
+// exact on canonical forms, never case folding, so a name the authorization
+// checks treat as different can't reach another account.
 func findByType(accounts []stalwart.Account, accountType, address string) *stalwart.Account {
+	address = auth.CanonicalName(address)
 	for i := range accounts {
-		if accounts[i].Type == accountType && strings.EqualFold(accounts[i].Email, address) {
+		if accounts[i].Type == accountType && auth.CanonicalName(accounts[i].Email) == address {
 			return &accounts[i]
 		}
 	}
@@ -526,13 +529,14 @@ func aliasAddresses(account stalwart.Account, domains map[string]string) map[str
 }
 
 func addressInUse(accounts []stalwart.Account, domains []stalwart.Domain, address string) bool {
+	address = auth.CanonicalName(address)
 	names := domainNames(domains)
 	for _, account := range accounts {
-		if strings.EqualFold(account.Email, address) {
+		if auth.CanonicalName(account.Email) == address {
 			return true
 		}
 		for _, alias := range aliasAddresses(account, names) {
-			if strings.EqualFold(alias, address) {
+			if auth.CanonicalName(alias) == address {
 				return true
 			}
 		}

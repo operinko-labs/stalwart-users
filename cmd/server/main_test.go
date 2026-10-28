@@ -216,9 +216,11 @@ func TestDomainAdminCannotUseMixedCaseNamesToBypassChecks(t *testing.T) {
 	store := directory.New(accountsStalwart{accounts: []stalwart.Account{
 		{ID: "d", Type: "User", Email: "dora@client.fi"},
 		{ID: "p", Type: "User", Email: "pete@client.fi"},
+		{ID: "s", Type: "User", Email: "sam@client.fi"},
 	}}, exactAdminDomains{
 		"dora@client.fi": {"client.fi"},
 		"pete@client.fi": {"client.fi", "other.fi"},
+		"sam@client.fi":  {"client.fi", "other.fi"},
 	})
 	handler, err := newServerHandler(serverConfig{JWTSecret: serverTestJWTSecret}, nil, store)
 	if err != nil {
@@ -243,6 +245,9 @@ func TestDomainAdminCannotUseMixedCaseNamesToBypassChecks(t *testing.T) {
 	}{
 		{name: "reset peer password", method: http.MethodPut, path: "/api/accounts/Pete@client.fi/password", body: `{"new_password":"new-Password-1"}`, want: http.StatusForbidden, error: "forbidden"},
 		{name: "delete peer", method: http.MethodDelete, path: "/api/accounts/Pete@Client.fi", want: http.StatusForbidden, error: "forbidden"},
+		// %C5%BF is U+017F, which case-folds to "s" but doesn't lower-case to it.
+		{name: "reset folded peer password", method: http.MethodPut, path: "/api/accounts/%C5%BFam@client.fi/password", body: `{"new_password":"new-Password-1"}`, want: http.StatusNotFound, error: "account not found"},
+		{name: "delete folded peer", method: http.MethodDelete, path: "/api/accounts/%C5%BFam@client.fi", want: http.StatusNotFound, error: "account not found"},
 		{name: "own password without current", method: http.MethodPut, path: "/api/accounts/Dora@client.fi/password", body: `{"new_password":"new-Password-1"}`, want: http.StatusBadRequest, error: "current_password is required"},
 	}
 

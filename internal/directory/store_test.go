@@ -629,3 +629,30 @@ func TestDeleteAccountMixedCaseRemovesCanonicalAdminDomains(t *testing.T) {
 		t.Fatalf("admins.deleted = %v, want [dora@client.fi]", admins.deleted)
 	}
 }
+
+func TestFoldingVariantsDoNotMatch(t *testing.T) {
+	t.Parallel()
+
+	store, client, _ := newStore()
+	client.accounts = append(client.accounts, stalwart.Account{ID: "s1", Type: "User", Name: "sam", Email: "sam@client.fi"})
+
+	// U+017F (long s) case-folds to "s" but does not lower-case to it.
+	if got, err := store.GetAccount("ſam@client.fi"); got != nil || err != nil {
+		t.Fatalf("GetAccount() = %#v, %v; want nil, nil", got, err)
+	}
+	if isAdmin, err := store.IsAdmin("ſam@client.fi"); isAdmin || err != nil {
+		t.Fatalf("IsAdmin() = %v, %v; want false, nil", isAdmin, err)
+	}
+	if err := store.SetPassword("ſam@client.fi", "pw"); !errors.Is(err, db.ErrAccountNotFound) {
+		t.Fatalf("SetPassword() err = %v, want ErrAccountNotFound", err)
+	}
+	if got, err := store.GetEmailType("dora@client.fi", "ſales@client.fi"); got != "" || err != nil {
+		t.Fatalf("GetEmailType() = %q, %v; want empty", got, err)
+	}
+	if inUse, err := store.AddressInUse("ſam@client.fi"); inUse || err != nil {
+		t.Fatalf("AddressInUse() = %v, %v; want false", inUse, err)
+	}
+	if err := store.DeleteEmail("dora@client.fi", "ſales@client.fi"); err != nil || client.updateCalls != 0 {
+		t.Fatalf("DeleteEmail() err = %v, updates = %d; want no-op", err, client.updateCalls)
+	}
+}

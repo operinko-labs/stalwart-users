@@ -37,7 +37,7 @@ func newAdminDomainsHandler(store adminDomainsStore) http.HandlerFunc {
 
 		account, err := store.GetAccount(name)
 		if err != nil {
-			writeError(w, http.StatusInternalServerError, err.Error())
+			writeStoreError(w, err)
 			return
 		}
 		if account == nil {
@@ -49,7 +49,7 @@ func newAdminDomainsHandler(store adminDomainsStore) http.HandlerFunc {
 		switch r.Method {
 		case http.MethodGet:
 			if domains, err = store.ListAdminDomains(name); err != nil {
-				writeError(w, http.StatusInternalServerError, err.Error())
+				writeStoreError(w, err)
 				return
 			}
 		case http.MethodPut:
@@ -63,7 +63,7 @@ func newAdminDomainsHandler(store adminDomainsStore) http.HandlerFunc {
 				return
 			}
 			if err := store.SetAdminDomains(name, domains); err != nil {
-				writeError(w, http.StatusInternalServerError, err.Error())
+				writeStoreError(w, err)
 				return
 			}
 		default:

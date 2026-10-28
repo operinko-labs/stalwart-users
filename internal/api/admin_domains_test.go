@@ -14,6 +14,7 @@ import (
 type mockAdminDomainsStore struct {
 	getAccountResult *model.Account
 	domains          []string
+	setErr           error
 
 	setCalls   int
 	setName    string
@@ -32,7 +33,7 @@ func (m *mockAdminDomainsStore) SetAdminDomains(name string, domains []string) e
 	m.setCalls++
 	m.setName = name
 	m.setDomains = domains
-	return nil
+	return m.setErr
 }
 
 func serveAdminDomainsRequest(store adminDomainsStore, method, body string) *httptest.ResponseRecorder {
@@ -145,4 +146,14 @@ func TestAdminDomainsHandlerReturnsNotFoundForMissingAccount(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestAdminDomainsHandlerMapsStoreErrors(t *testing.T) {
+	t.Parallel()
+
+	store := &mockAdminDomainsStore{getAccountResult: &model.Account{Name: "dora@client.fi"}, setErr: errAccountNotFound}
+
+	rr := serveAdminDomainsRequest(store, http.MethodPut, `{"domains":["client.fi"]}`)
+
+	assertError(t, rr, http.StatusNotFound, "account not found")
 }

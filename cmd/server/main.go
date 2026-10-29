@@ -2,12 +2,14 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
 	"os"
 	"os/signal"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -76,12 +78,41 @@ func main() {
 	defer stop()
 	go registerOAuthClient(ctx, adminStalwart, oauthClientSpec(cfg), sleepContext)
 
-	// Start HTTP server
+	// Start HTTP server; SIGINT/SIGTERM shut it down gracefully.
 	addr := fmt.Sprintf(":%d", cfg.Port)
 	log.Printf("Listening on %s", addr)
-	if err := http.ListenAndServe(addr, handler); err != nil {
+	srv := &http.Server{Addr: addr, Handler: handler}
+	if err := serve(ctx, srv, shutdownTimeout); err != nil {
 		log.Fatalf("Server error: %v", err)
 	}
+	stop()
+	log.Printf("Server stopped")
+}
+
+const shutdownTimeout = 10 * time.Second
+
+// serve runs srv until ctx is cancelled, then shuts it down gracefully, waiting
+// up to timeout for in-flight requests. A server failure other than a clean
+// close is returned.
+func serve(ctx context.Context, srv *http.Server, timeout time.Duration) error {
+	errc := make(chan error, 1)
+	go func() { errc <- srv.ListenAndServe() }()
+
+	select {
+	case err := <-errc:
+		if errors.Is(err, http.ErrServerClosed) {
+			return nil
+		}
+		return err
+	case <-ctx.Done():
+	}
+
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	if err := srv.Shutdown(shutdownCtx); err != nil {
+		return fmt.Errorf("shutdown: %w", err)
+	}
+	return nil
 }
 
 func loadConfigFromEnv() (serverConfig, error) {
@@ -177,12 +208,20 @@ func registerOAuthClient(ctx context.Context, ensurer oauthClientEnsurer, spec s
 		if ctx.Err() != nil {
 			return
 		}
-		log.Printf("OAuth client %s registration failed, retrying in %s: %v", spec.ClientID, backoff, err)
+		log.Printf("OAuth client %s registration failed, retrying in %s: %s", spec.ClientID, backoff, redact(err.Error(), spec.Secret))
 		if !sleep(ctx, backoff) {
 			return
 		}
 		backoff = min(backoff*2, oauthRegisterMaxBackoff)
 	}
+}
+
+// redact masks secret in text; an empty secret masks nothing.
+func redact(text, secret string) string {
+	if secret == "" {
+		return text
+	}
+	return strings.ReplaceAll(text, secret, "[redacted]")
 }
 
 // sleepContext waits for d and reports whether it ran to the end (false when

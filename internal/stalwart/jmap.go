@@ -17,6 +17,9 @@ import (
 const (
 	jmapCoreCapability     = "urn:ietf:params:jmap:core"
 	jmapStalwartCapability = "urn:stalwart:jmap"
+
+	// maxErrorBodyBytes bounds how much of a non-200 body goes into an error.
+	maxErrorBodyBytes = 512
 )
 
 type Client struct {
@@ -420,7 +423,7 @@ func (c *Client) callAs(ctx context.Context, bearerToken, method string, argumen
 		return fmt.Errorf("%s: %w", method, ErrUnauthorized)
 	}
 	if resp.StatusCode != http.StatusOK {
-		responseBody, readErr := io.ReadAll(resp.Body)
+		responseBody, readErr := io.ReadAll(io.LimitReader(resp.Body, maxErrorBodyBytes))
 		if readErr != nil {
 			return fmt.Errorf("%s request failed with status %d and unreadable body: %w", method, resp.StatusCode, readErr)
 		}

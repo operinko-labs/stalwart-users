@@ -1,12 +1,15 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -581,5 +584,75 @@ func TestRegisterOAuthClientStopsWhenContextIsCancelled(t *testing.T) {
 	}
 	if ensurer.calls != 1 {
 		t.Fatalf("EnsureOAuthClient calls = %d, want 1", ensurer.calls)
+	}
+}
+
+// secretEchoEnsurer fails once with an error that echoes the secret.
+type secretEchoEnsurer struct {
+	secret string
+	calls  int
+}
+
+func (e *secretEchoEnsurer) EnsureOAuthClient(context.Context, stalwart.OAuthClientSpec) (bool, error) {
+	e.calls++
+	if e.calls == 1 {
+		return false, errors.New("stalwart said: bad secret " + e.secret)
+	}
+	return true, nil
+}
+
+// Not parallel: it swaps the global log output.
+func TestRegisterOAuthClientLogsNeverContainTheSecret(t *testing.T) {
+	var buf bytes.Buffer
+	log.SetOutput(&buf)
+	t.Cleanup(func() { log.SetOutput(os.Stderr) })
+
+	const secret = "super-secret-value"
+	registerOAuthClient(context.Background(), &secretEchoEnsurer{secret: secret},
+		stalwart.OAuthClientSpec{ClientID: "stalwart-users", Secret: secret},
+		func(context.Context, time.Duration) bool { return true })
+
+	out := buf.String()
+	if strings.Contains(out, secret) {
+		t.Fatalf("log output contains the secret: %s", out)
+	}
+	if !strings.Contains(out, "registration failed") || !strings.Contains(out, "OAuth client stalwart-users created") {
+		t.Fatalf("log output = %s, want the failure and the success line", out)
+	}
+}
+
+func TestServeShutsDownWhenContextIsCancelled(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	srv := &http.Server{Addr: "127.0.0.1:0", Handler: http.NotFoundHandler()}
+	done := make(chan error, 1)
+	go func() { done <- serve(ctx, srv, 5*time.Second) }()
+
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("serve() = %v, want nil after a graceful shutdown", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("serve() did not return after the context was cancelled")
+	}
+}
+
+func TestServeReturnsListenErrors(t *testing.T) {
+	t.Parallel()
+
+	srv := &http.Server{Addr: "127.0.0.1:notaport", Handler: http.NotFoundHandler()}
+	done := make(chan error, 1)
+	go func() { done <- serve(context.Background(), srv, time.Second) }()
+
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("serve() = nil, want the listen error")
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("serve() did not return the listen error")
 	}
 }

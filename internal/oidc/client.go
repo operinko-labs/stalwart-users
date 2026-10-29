@@ -52,12 +52,36 @@ type Client struct {
 	disc *discovery
 }
 
+// maxRedirects bounds how many redirects a provider request follows.
+const maxRedirects = 3
+
 // New returns a client for cfg. A nil httpClient gets one with a 15s timeout.
+// Whatever client is used, provider requests follow at most 3 redirects, only
+// to the same host and never from https to http: the client credentials and
+// bearer tokens must not be sent anywhere else. The caller's client is copied,
+// not modified.
 func New(cfg Config, httpClient *http.Client) *Client {
 	if httpClient == nil {
 		httpClient = &http.Client{Timeout: 15 * time.Second}
 	}
-	return &Client{cfg: cfg, httpClient: httpClient}
+	hc := *httpClient
+	hc.CheckRedirect = sameHostRedirect
+	return &Client{cfg: cfg, httpClient: &hc}
+}
+
+// sameHostRedirect is the http.Client CheckRedirect for provider requests.
+func sameHostRedirect(req *http.Request, via []*http.Request) error {
+	if len(via) > maxRedirects {
+		return fmt.Errorf("stopped after %d redirects", maxRedirects)
+	}
+	first := via[0]
+	if req.URL.Host != first.URL.Host {
+		return errors.New("refusing redirect to another host")
+	}
+	if first.URL.Scheme == "https" && req.URL.Scheme != "https" {
+		return errors.New("refusing redirect from https to http")
+	}
+	return nil
 }
 
 // discover fetches the discovery document on first use and caches it. A

@@ -3,11 +3,13 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/operinko-labs/stalwart-users/internal/auth"
 	"github.com/operinko-labs/stalwart-users/internal/directory"
@@ -65,7 +67,7 @@ func newTestServerHandler(t *testing.T) http.Handler {
 func TestLoadConfigRequiresStalwartDatabaseAndOIDC(t *testing.T) {
 	required := []string{
 		"DATABASE_URL", "STALWART_URL", "STALWART_ADMIN_TOKEN",
-		"OIDC_ISSUER", "OIDC_CLIENT_ID", "OIDC_CLIENT_SECRET", "OIDC_REDIRECT_URL",
+		"OIDC_ISSUER", "OIDC_CLIENT_ID", "OIDC_REDIRECT_URL",
 	}
 
 	for _, missing := range required {
@@ -440,5 +442,144 @@ func TestBasicLoginRouteIsGone(t *testing.T) {
 
 	if rr.Code != http.StatusUnauthorized || sessionCookie(rr) != nil {
 		t.Fatalf("POST /api/auth/login = %d, want 401 from the session middleware", rr.Code)
+	}
+}
+
+func TestLoadConfigClientSecretIsOptional(t *testing.T) {
+	setBase := func(t *testing.T) {
+		t.Setenv("JWT_SECRET", serverTestJWTSecret)
+		t.Setenv("DATABASE_URL", "postgres://db")
+		t.Setenv("STALWART_URL", "http://stalwart")
+		t.Setenv("STALWART_ADMIN_TOKEN", "token")
+		t.Setenv("OIDC_ISSUER", "https://mail.example.com")
+		t.Setenv("OIDC_CLIENT_ID", "stalwart-users")
+		t.Setenv("OIDC_REDIRECT_URL", "https://users.example.com/api/auth/callback")
+	}
+
+	t.Run("derived when empty", func(t *testing.T) {
+		setBase(t)
+		t.Setenv("OIDC_CLIENT_SECRET", "")
+
+		cfg, err := loadConfigFromEnv()
+		if err != nil {
+			t.Fatalf("loadConfigFromEnv() error = %v", err)
+		}
+		if want := auth.DeriveOAuthClientSecret(serverTestJWTSecret); cfg.OIDCClientSecret != want {
+			t.Fatalf("OIDCClientSecret = %q, want the derived secret", cfg.OIDCClientSecret)
+		}
+	})
+
+	t.Run("override wins", func(t *testing.T) {
+		setBase(t)
+		t.Setenv("OIDC_CLIENT_SECRET", "explicit")
+
+		cfg, err := loadConfigFromEnv()
+		if err != nil {
+			t.Fatalf("loadConfigFromEnv() error = %v", err)
+		}
+		if cfg.OIDCClientSecret != "explicit" {
+			t.Fatalf("OIDCClientSecret = %q, want explicit", cfg.OIDCClientSecret)
+		}
+	})
+}
+
+type fakeEnsurer struct {
+	failures int
+	calls    int
+	specs    []stalwart.OAuthClientSpec
+	created  bool
+}
+
+func (f *fakeEnsurer) EnsureOAuthClient(_ context.Context, spec stalwart.OAuthClientSpec) (bool, error) {
+	f.calls++
+	f.specs = append(f.specs, spec)
+	if f.calls <= f.failures {
+		return false, errors.New("stalwart not ready")
+	}
+	return f.created, nil
+}
+
+func TestOAuthClientSpecFromConfig(t *testing.T) {
+	t.Parallel()
+
+	spec := oauthClientSpec(oidcTestConfig("https://mail.example.com", ""))
+	want := stalwart.OAuthClientSpec{
+		ClientID:    "stalwart-users",
+		Secret:      "client-secret",
+		RedirectURI: "https://users.example.com/api/auth/callback",
+		Description: "stalwart-users",
+	}
+	if spec != want {
+		t.Fatalf("spec = %#v, want %#v", spec, want)
+	}
+}
+
+func TestRegisterOAuthClientRetriesUntilItSucceeds(t *testing.T) {
+	t.Parallel()
+
+	ensurer := &fakeEnsurer{failures: 3}
+	var sleeps []time.Duration
+	sleep := func(_ context.Context, d time.Duration) bool {
+		sleeps = append(sleeps, d)
+		return true
+	}
+
+	registerOAuthClient(context.Background(), ensurer, stalwart.OAuthClientSpec{ClientID: "stalwart-users"}, sleep)
+
+	if ensurer.calls != 4 {
+		t.Fatalf("EnsureOAuthClient calls = %d, want 4", ensurer.calls)
+	}
+	want := []time.Duration{5 * time.Second, 10 * time.Second, 20 * time.Second}
+	if len(sleeps) != len(want) {
+		t.Fatalf("sleeps = %v, want %v", sleeps, want)
+	}
+	for i := range want {
+		if sleeps[i] != want[i] {
+			t.Fatalf("sleeps = %v, want %v", sleeps, want)
+		}
+	}
+}
+
+func TestRegisterOAuthClientBackoffCapsAtOneMinute(t *testing.T) {
+	t.Parallel()
+
+	ensurer := &fakeEnsurer{failures: 8}
+	var sleeps []time.Duration
+	registerOAuthClient(context.Background(), ensurer, stalwart.OAuthClientSpec{}, func(_ context.Context, d time.Duration) bool {
+		sleeps = append(sleeps, d)
+		return true
+	})
+
+	if last := sleeps[len(sleeps)-1]; last != 60*time.Second {
+		t.Fatalf("sleeps = %v, want the last at the 60s cap", sleeps)
+	}
+	for _, d := range sleeps {
+		if d > 60*time.Second {
+			t.Fatalf("sleeps = %v, want none above 60s", sleeps)
+		}
+	}
+}
+
+func TestRegisterOAuthClientStopsWhenContextIsCancelled(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	ensurer := &fakeEnsurer{failures: 1 << 30}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		registerOAuthClient(ctx, ensurer, stalwart.OAuthClientSpec{}, func(ctx context.Context, d time.Duration) bool {
+			cancel()
+			return false
+		})
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("registerOAuthClient did not return after the context was cancelled")
+	}
+	if ensurer.calls != 1 {
+		t.Fatalf("EnsureOAuthClient calls = %d, want 1", ensurer.calls)
 	}
 }

@@ -1,11 +1,14 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
 	"strconv"
+	"syscall"
 	"time"
 
 	"github.com/operinko-labs/stalwart-users/internal/api"
@@ -59,12 +62,19 @@ func main() {
 		log.Fatalf("Failed to create domain admins table: %v", err)
 	}
 
-	store := directory.New(stalwart.NewClient(cfg.StalwartURL, cfg.StalwartAdminToken), pool)
+	adminStalwart := stalwart.NewClient(cfg.StalwartURL, cfg.StalwartAdminToken)
+	store := directory.New(adminStalwart, pool)
 
 	handler, err := newServerHandler(cfg, pool, store)
 	if err != nil {
 		log.Fatalf("Failed to create server: %v", err)
 	}
+
+	// Register this app's OAuth client in Stalwart in the background; the
+	// server doesn't wait for it.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	go registerOAuthClient(ctx, adminStalwart, oauthClientSpec(cfg), sleepContext)
 
 	// Start HTTP server
 	addr := fmt.Sprintf(":%d", cfg.Port)
@@ -111,7 +121,6 @@ func loadConfigFromEnv() (serverConfig, error) {
 		{"STALWART_ADMIN_TOKEN", cfg.StalwartAdminToken},
 		{"OIDC_ISSUER", cfg.OIDCIssuer},
 		{"OIDC_CLIENT_ID", cfg.OIDCClientID},
-		{"OIDC_CLIENT_SECRET", cfg.OIDCClientSecret},
 		{"OIDC_REDIRECT_URL", cfg.OIDCRedirectURL},
 	} {
 		if required.value == "" {
@@ -119,7 +128,74 @@ func loadConfigFromEnv() (serverConfig, error) {
 		}
 	}
 
+	// OIDC_CLIENT_SECRET is an optional override; by default the secret is
+	// derived from JWT_SECRET and registered in Stalwart at startup.
+	if cfg.OIDCClientSecret == "" {
+		cfg.OIDCClientSecret = auth.DeriveOAuthClientSecret(cfg.JWTSecret)
+	}
+
 	return cfg, nil
+}
+
+const (
+	oauthRegisterTimeout    = 10 * time.Second
+	oauthRegisterMinBackoff = 5 * time.Second
+	oauthRegisterMaxBackoff = 60 * time.Second
+)
+
+type oauthClientEnsurer interface {
+	EnsureOAuthClient(ctx context.Context, spec stalwart.OAuthClientSpec) (bool, error)
+}
+
+func oauthClientSpec(cfg serverConfig) stalwart.OAuthClientSpec {
+	return stalwart.OAuthClientSpec{
+		ClientID:    cfg.OIDCClientID,
+		Secret:      cfg.OIDCClientSecret,
+		RedirectURI: cfg.OIDCRedirectURL,
+		Description: "stalwart-users",
+	}
+}
+
+// registerOAuthClient registers spec in Stalwart, retrying with a doubling
+// backoff (5s up to 60s) until it succeeds or ctx is cancelled. sleep waits
+// for d and reports false when ctx ended first. Nothing it logs includes the
+// secret.
+func registerOAuthClient(ctx context.Context, ensurer oauthClientEnsurer, spec stalwart.OAuthClientSpec, sleep func(context.Context, time.Duration) bool) {
+	backoff := oauthRegisterMinBackoff
+	for {
+		attemptCtx, cancel := context.WithTimeout(ctx, oauthRegisterTimeout)
+		created, err := ensurer.EnsureOAuthClient(attemptCtx, spec)
+		cancel()
+		if err == nil {
+			state := "updated"
+			if created {
+				state = "created"
+			}
+			log.Printf("OAuth client %s %s", spec.ClientID, state)
+			return
+		}
+		if ctx.Err() != nil {
+			return
+		}
+		log.Printf("OAuth client %s registration failed, retrying in %s: %v", spec.ClientID, backoff, err)
+		if !sleep(ctx, backoff) {
+			return
+		}
+		backoff = min(backoff*2, oauthRegisterMaxBackoff)
+	}
+}
+
+// sleepContext waits for d and reports whether it ran to the end (false when
+// ctx was cancelled first).
+func sleepContext(ctx context.Context, d time.Duration) bool {
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		return true
+	case <-ctx.Done():
+		return false
+	}
 }
 
 func newServerHandler(cfg serverConfig, pool *db.Pool, store *directory.Store) (http.Handler, error) {
